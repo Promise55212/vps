@@ -78,6 +78,14 @@ def read_meta(path):
     return values, revision
 
 
+def file_revision(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 @contextlib.contextmanager
 def readonly_lock(path):
     import fcntl
@@ -131,6 +139,7 @@ NATIVE_SHA256 = {
     "vless": {
         "common.sh": "4a1a77e9e2ccfe057412f1d094892b7fde9ece56923f98181ee92611e801eeda",
         "quota-lib.sh": "7cd701d0d2113135cb80e887cba0f807a713a276a8d177b26acc0327c37e0a33",
+        "quota-query.py": "abd30ef463bd157bcef9bd464517174375638688dea9de223bfd23b0c17146b2",
         "iplimit-lib.sh": "86b2b49aa59bb0be1c83b9f7b76cdb4e4fe511143840ff3160641e88d9b605e3",
         "vless_audit.sh": "4ee0dcccfa337197b680b6de4a65ae1beed17b2b586094900191c0ec374a53c8",
         "vless_mktemp.sh": "611d55693a6d2337fd9b89eb46852fe994942d1ae13163bd55c1cf533ecc9685",
@@ -195,12 +204,38 @@ def exact_replace(text, old, replacement, count=1):
     return text.replace(old, replacement)
 
 
-def audit_program(text, protocol, prefix, directory):
+def audit_program(text, protocol, prefix, directory, *, source_only=False):
     # Keep the native audit and its exit status, capture its rows before rendering.
     text = exact_replace(text, 'TMP_ROWS="$(mktemp)"\ntrap \'rm -f "$TMP_ROWS"\' EXIT\n', '')
     text = exact_replace(text, ' >>"$TMP_ROWS"', '', 2)
     text = exact_replace(text, f'{prefix}_ensure_runtime_dirs\n', '')
-    return exact_replace(text, f"""sort -t $'\t' -k3,3n "$TMP_ROWS" | /usr/local/lib/{directory}/render_table.py {protocol}\n""".replace("\t", "\\t"), '')
+    text = exact_replace(text, f"""sort -t $'\t' -k3,3n "$TMP_ROWS" | /usr/local/lib/{directory}/render_table.py {protocol}\n""".replace("\t", "\\t"), '')
+    if protocol == "hy2":
+        text = exact_replace(text, 'main_port="$(hy2_main_port)"', 'main_port="$HVS_MAIN_PORT"')
+    else:
+        text = exact_replace(text, '''  MAIN_PORT="$(vr_meta_get "$VR_MAIN_STATE_FILE" PORT 2>/dev/null || true)"
+  if [[ ! "$MAIN_PORT" =~ ^[0-9]+$ ]]; then
+    vr_load_defaults >/dev/null 2>&1 || true
+    MAIN_PORT="${PORT:-443}"
+  fi
+''', '  MAIN_PORT="$HVS_MAIN_PORT"\n')
+    if not source_only:
+        return text
+
+    # Omit lock acquisition and call the audited readers directly on the source.
+    for name in ("common.sh", "quota-lib.sh", "iplimit-lib.sh"):
+        text = exact_replace(text, f"source /usr/local/lib/{directory}/{name}\n", "")
+    if protocol == "vless":
+        text = exact_replace(text, '''if [[ "${VR_TEMP_LOCK_HELD:-0}" != "1" ]]; then
+  vr_acquire_lock_fd 7 "${VR_LOCK_DIR}/temp.lock" 120 "temp 锁繁忙"
+  export VR_TEMP_LOCK_HELD=1
+fi
+''', "")
+        text = exact_replace(text, "\nvr_il_lock\n", "\n")
+        for function in ("vr_il_state", "vr_il_family_guard_state"):
+            text = exact_replace(text, f"{function} ", f"{function}_unlocked ")
+    text = exact_replace(text, f"\n{prefix}_pq_lock\n", "\n")
+    return exact_replace(text, f"{prefix}_pq_snapshot ", f"{prefix}_pq_snapshot_unlocked ")
 
 
 def creator_program(text, prefix):
@@ -263,15 +298,20 @@ def alive(row):
             f"端口 {row['port']} 已到计划重置时间，请等原生重置完成")
 
 
-def fresh_reference(source):
-    alive(source)
-    age = int(time.time()) - integer(source.get("sampled_at"), "来源采样时间", 1)
+def fresh_sample(sampled_at):
+    age = int(time.time()) - integer(sampled_at, "来源采样时间", 1)
     require(-30 <= age <= 30, "来源采样已经过时或两端时钟差过大，请重新预检")
 
 
+def fresh_reference(source):
+    alive(source)
+    fresh_sample(source.get("sampled_at"))
+
+
 class Native:
-    def __init__(self, protocol):
+    def __init__(self, protocol, *, role="target"):
         self.protocol = protocol
+        self.role = role
         self.directory, self.prefix, self.tag_prefix, self.quota_lock = PROTOCOLS[protocol]
         self.lib = Path("/usr/local/lib") / self.directory
         self.state = Path("/var/lib") / self.directory
@@ -288,9 +328,11 @@ class Native:
         self.host, self.boot = machine_ids()
 
     def env(self, **extra):
-        # These flags are set only on children of a process holding the native temp lock.
-        return dict(PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME="/root",
-                    LANG="C.UTF-8", **{f"{self.prefix.upper()}_TEMP_LOCK_HELD": "1"}, **extra)
+        env = dict(PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME="/root",
+                   LANG="C.UTF-8", PYTHONDONTWRITEBYTECODE="1", **extra)
+        if self.role == "target":
+            env[f"{self.prefix.upper()}_TEMP_LOCK_HELD"] = "1"
+        return env
 
     def run(self, arguments, *, data=None, env=None, timeout=40, allowed=(0,)):
         options = dict(env=self.env() if env is None else env, capture_output=True, encoding="utf-8",
@@ -308,12 +350,33 @@ class Native:
                         timeout=timeout, allowed=allowed)
 
     def call(self, text, library, *args, quota_lock=False, timeout=40):
+        require(self.role == "target", "来源会话仅能执行只读适配器")
         flags = {f"{self.prefix.upper()}_PQ_LOCK_HELD": "1"} if quota_lock else {}
         return self.run(("/bin/bash", "--noprofile", "--norc", "-c", text, "node-sync", self.lib / library,
                          self.prefix, *args), env=self.env(**flags), timeout=timeout).stdout.strip()
 
+    def source_bash(self, text, libraries, *, timeout=40, allowed=(0,), **extra):
+        # Execute verified copies. A concurrent native update cannot swap the
+        # path between the hash check and Bash loading the library.
+        program = [self.checked("common.sh")]
+        for name in libraries:
+            library = exact_replace(self.checked(name), f"source {self.lib}/common.sh\n", "")
+            if name == "quota-lib.sh" and self.protocol == "vless":
+                extra["HVS_QUOTA_QUERY"] = self.checked("quota-query.py")
+                library = exact_replace(library, 'python3 "${VR_BASE_DIR}/quota-query.py" live "$port"',
+                                        'python3 -IB -c "$HVS_QUOTA_QUERY" live "$port"')
+            program.append(library)
+        program.append(text)
+        script = "\n".join(program)
+        # Bash can spool these redirections to a temporary file. The pinned
+        # readers' quoted Python bodies and here strings need only memory and pipes.
+        script = re.sub(r"python3 - ([^\n]+?) <<'(\w+)'\n(.*?)^\2\n",
+                        lambda m: f"python3 -IB -c {shlex.quote(m[3])} {m[1]}\n", script, flags=re.M | re.S)
+        script = re.sub(r'<<<(".*")(?= \||$)', lambda m: f"< <(printf '%s\\n' {m[1]})", script, flags=re.M)
+        return self.bash(script, env=self.env(**extra), timeout=timeout, allowed=allowed)
+
     def checked(self, name):
-        path = (self.lib if name in ("common.sh", "quota-lib.sh", "iplimit-lib.sh") else self.sbin) / name
+        path = (self.lib if name in ("common.sh", "quota-lib.sh", "iplimit-lib.sh", "quota-query.py") else self.sbin) / name
         data, info = read_file(path)
         hash_value = digest(data)
         require(info.st_uid == os.geteuid() and not info.st_mode & 0o022, f"{path} 所有者或权限异常")
@@ -321,9 +384,11 @@ class Native:
         return data.decode("utf-8")
 
     def locked(self):
+        require(self.role == "target", "来源会话不获取原生节点锁")
         return readonly_lock(self.runtime / "temp.lock")
 
     def quota_locked(self):
+        require(self.role == "target", "来源会话不获取原生配额锁")
         return readonly_lock(self.runtime / self.quota_lock)
 
     def paths(self, tag):
@@ -431,12 +496,20 @@ class Native:
         return data, raw.get("REBUILD_PENDING", "0")
 
     def quota(self, row, meta):
+        path = self.state / "quota" / f"{row['port']}.env"
+        revision = file_revision(path) if self.role == "source" else None
         q, pending = self.raw_quota(row["port"], row["tag"], meta.get("PQ_LIMIT_BYTES"))
         require(pending in (None, "0"), "原生配额待恢复")
         if q is not None:
             require(q["expires"] in (0, row["expires"]) and q["duration"] in (0, row["duration"]),
                     "节点到期或有效期与配额元数据不一致")
-        fields = self.call(READ_NATIVE, "quota-lib.sh", row["port"], quota_lock=True).split("|")
+        if self.role == "source":
+            probe = f'{self.prefix}_pq_snapshot_unlocked "$HVS_PORT"\n'
+            value = self.source_bash(probe, ("quota-lib.sh",), HVS_PORT=str(row["port"])).stdout.strip()
+            require(file_revision(path) == revision, f"端口 {row['port']} 的来源配额在采样中变化")
+        else:
+            value = self.call(READ_NATIVE, "quota-lib.sh", row["port"], quota_lock=True)
+        fields = value.split("|")
         require(len(fields) == 4, "原生实时配额输出不完整")
         total, used, left = (integer(value, "实时配额字节") for value in fields[1:])
         if q is None:
@@ -459,15 +532,26 @@ class Native:
             kind = "state"
         else:
             require(not path.exists() and not path.is_symlink(), "无 IP 上限节点存在额外手工 IP 策略")
-        require(self.call(READ_IP, "iplimit-lib.sh", kind, row["port"]) == "active", "内核 IP 防护状态异常")
+        if self.role == "source":
+            probe = f'{self.prefix}_il_{kind}_unlocked "$HVS_PORT"\n'
+            state = self.source_bash(probe, ("iplimit-lib.sh",), HVS_PORT=str(row["port"])).stdout.strip()
+        else:
+            state = self.call(READ_IP, "iplimit-lib.sh", kind, row["port"])
+        require(state == "active", "内核 IP 防护状态异常")
 
-    def native_audit(self):
+    def native_audit(self, main):
         script = self.checked(f"{self.protocol}_audit.sh")
-        upper = self.prefix.upper()
-        with self.quota_locked(), readonly_lock(self.runtime / "iplimit.lock"):
-            raw = self.bash(audit_program(script, self.protocol, self.prefix, self.directory), timeout=180,
-                            env=self.env(**{f"{upper}_PQ_LOCK_HELD": "1", f"{upper}_IL_LOCK_HELD": "1"}),
-                            allowed=(0, 1) if self.protocol == "vless" else (0,))
+        source = self.role == "source"
+        program = audit_program(script, self.protocol, self.prefix, self.directory, source_only=source)
+        allowed = (0, 1) if self.protocol == "vless" else (0,)
+        if source:
+            raw = self.source_bash(program, ("quota-lib.sh", "iplimit-lib.sh"), timeout=180,
+                                   allowed=allowed, HVS_MAIN_PORT=str(main))
+        else:
+            upper = self.prefix.upper()
+            with self.quota_locked(), readonly_lock(self.runtime / "iplimit.lock"):
+                raw = self.bash(program, timeout=180, allowed=allowed, env=self.env(
+                    HVS_MAIN_PORT=str(main), **{f"{upper}_PQ_LOCK_HELD": "1", f"{upper}_IL_LOCK_HELD": "1"}))
         rows = {}
         for line in raw.stdout.splitlines():
             fields = line.split("\t")
@@ -536,7 +620,32 @@ class Native:
         return {day: [integer(values[key], "每日流量") for key in ("upload", "download")]
                 for day, values in record["days"].items() if 0 <= (today - dt.date.fromisoformat(day)).days < 30}
 
+    def source_revision(self):
+        # Track topology and identities without using locks or comparing live counters.
+        watched = [self.state / "main/main.env", self.pending]
+        for directory, suffixes, prefix in (
+            (self.state / "temp", (".env", ".url"), ""),
+            (self.config, (self.config_extension,), self.tag_prefix),
+            (self.units, (".service",), self.tag_prefix),
+        ):
+            watched.append(directory)
+            watched.extend(path for path in directory.iterdir()
+                           if path.name.startswith(prefix) and path.name.endswith(suffixes))
+        return digest(wire_bytes([(str(path), file_revision(path)) for path in sorted(watched)]))
+
+    def absent(self, port, revision):
+        require(self.source_revision() == revision, "来源节点清单在删除前变化，请重新对账")
+        for path in (self.state / "temp").glob("*.env"):
+            meta, _ = read_meta(path)
+            require(integer(meta.get("PORT"), "来源临时端口", 1, 65535) != port, f"来源已出现端口 {port}")
+            require(integer(meta.get("EXPIRE_EPOCH"), "来源到期时刻", 1) > int(time.time()),
+                    "来源有节点已到期，请等原生清理完成后重新对账")
+        require(self.source_revision() == revision, "来源节点清单在删除前变化，请重新对账")
+        return int(time.time())
+
     def inventory(self, history=False):
+        source = self.role == "source"
+        revision = self.source_revision() if source else None
         result = dict(protocol=self.protocol, host=self.host, boot=self.boot, nodes=[], issues=[], main=None,
                       reserved=[], pending=None, reset_timer=False, sampled=int(time.time()))
         issues, rows = result["issues"], result["nodes"]
@@ -546,7 +655,7 @@ class Native:
             self.checked(name)
         main = self.main_port()
         result["main"] = main
-        audit, audit_rc = self.native_audit()
+        audit, audit_rc = self.native_audit(main)
         main_row = audit.pop(self.main_name, None)
         if main_row != dict(port=main, active=True, listen=True):
             issues.append("原生审计主服务或主端口异常")
@@ -582,7 +691,7 @@ class Native:
                         f"端口 {port} 的审计或服务状态异常")
                 self.node_files(row, meta)
                 self.ip_policy(row)
-                with self.quota_locked():
+                with contextlib.nullcontext() if source else self.quota_locked():
                     row["quota"] = self.quota(row, meta)
                 alive(row)
                 if history:
@@ -591,7 +700,10 @@ class Native:
             except (SyncError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
                 issues.append(f"{tag!r} {safe_error(exc)}")
 
-        with self.quota_locked(), readonly_lock(self.runtime / "iplimit.lock"):
+        with contextlib.ExitStack() as locks:
+            if not source:
+                locks.enter_context(self.quota_locked())
+                locks.enter_context(readonly_lock(self.runtime / "iplimit.lock"))
             quota_ports = self.managed_rules(("pq",))
             native_ports = quota_ports | self.managed_rules(("iplimit",))
             policies = self.policy_ports(unique, issues)
@@ -606,6 +718,10 @@ class Native:
         if any(row["quota"] and row["quota"]["period"] for row in rows) and not result["reset_timer"]:
             issues.append("原生配额重置定时器未运行")
         result["nodes"].sort(key=lambda row: row["port"])
+        if source:
+            if self.source_revision() != revision:
+                issues.append("来源节点清单在对账中变化，请重新对账")
+            result["source_revision"] = revision
         return result
 
 
@@ -693,12 +809,23 @@ class Native:
         require(self.tag_absent(port, tag), f"端口 {port} 的原生服务或管理资源尚未清完")
 
     def one(self, expected):
+        port = integer(expected["port"], "端口", 1, 65535)
+        source = self.role == "source"
+        if source:
+            watched = (*self.paths(expected["tag"]), self.state / "main/main.env",
+                       *(self.state / kind / f"{port}.env" for kind in ("quota", "iplimit")))
+            revision = [file_revision(path) for path in watched]
         row, meta = self.read_tag(expected["tag"])
-        require(row["port"] == expected["port"], "端口归属已变化")
+        require(row["port"] == port, "端口归属已变化")
         self.node_files(row, meta)
-        with self.quota_locked():
+        if source:
+            self.ip_policy(row)
+        with contextlib.nullcontext() if source else self.quota_locked():
             row["quota"] = self.quota(row, meta)
             row["sampled_at"] = int(time.time())
+        if source:
+            require([file_revision(path) for path in watched] == revision,
+                    f"端口 {row['port']} 的来源状态在采样中变化")
         require(stable(row) == stable(expected), f"端口 {row['port']} 的节点或重置计划已变化")
         alive(row)
         return row
@@ -841,9 +968,10 @@ class Native:
             self.complete()
         return dict(port=port, action="balance", before=before["left"], wanted=left, actual=applied["left"])
 
-    def delete(self, expected, origin):
+    def delete(self, expected, origin, sampled_at):
         row = self.one(expected)
         port, tag = row["port"], row["tag"]
+        fresh_sample(sampled_at)
         self.store_recovery(dict(version=WIRE_VERSION, host=self.host, protocol=self.protocol, action="delete",
                                  source=origin, port=port, tag=tag, generation=row["generation"]))
         try:
@@ -865,6 +993,8 @@ class Native:
             row, meta = self.read_tag(tag)
             require(record["generation"] == row["generation"], "待恢复的端口已换成另一节点")
         if action in ("delete", "create"):
+            if action == "delete":
+                fresh_sample(source.get("sampled_at"))
             if not self.tag_absent(port, tag):
                 self.clean(port, tag)
         else:
@@ -1028,12 +1158,23 @@ def serve(factory=Native, check_root=True):
                 if op == "hello":
                     require(host is None, "SSH 会话已初始化")
                     require(not check_root or os.geteuid() == 0, "VPS 需要 root SSH 权限")
-                    protocol, role = request["protocol"], request["role"]
-                    require(protocol in PROTOCOLS and role in ("source", "target"), "SSH 会话角色或协议无效")
-                    host = factory(protocol)
+                    protocol, new_role = request["protocol"], request["role"]
+                    require(protocol in PROTOCOLS and new_role in ("source", "target"), "SSH 会话角色或协议无效")
+                    host = factory(protocol, role=new_role)
+                    role = new_role
                     data = dict(version=WIRE_VERSION, host=host.host, boot=host.boot)
+                elif role == "source":
+                    if op == "inventory":
+                        data = host.inventory(request.get("history", False))
+                    elif op == "one":
+                        data = host.one(request["row"])
+                    elif op == "absent":
+                        port = integer(request["port"], "端口", 1, 65535)
+                        data = host.absent(port, request["revision"])
+                    else:
+                        raise SyncError("来源会话只允许读取库存、余额与端口状态")
                 else:
-                    require(host is not None, "SSH 会话尚未初始化")
+                    require(role == "target", "SSH 会话尚未初始化")
                     if op == "lock":
                         require(not locked, "SSH 会话已经拿到节点锁")
                         locks.enter_context(host.locked())
@@ -1045,7 +1186,6 @@ def serve(factory=Native, check_root=True):
                             elif op == "journal":
                                 data = host.load_recovery()
                             else:
-                                require(role == "target", "仅目标会话可检查创建条件")
                                 data = []
                                 for row in request["rows"]:
                                     try:
@@ -1056,30 +1196,18 @@ def serve(factory=Native, check_root=True):
                                         data.append(dict(port=row["port"], error=safe_error(exc)))
                     else:
                         require(locked, "调用需要原生节点锁")
-                        if op == "one":
-                            data = host.one(request["row"])
-                        elif op == "absent":
-                            require(role == "source", "仅来源会话可确认缺失")
-                            port = integer(request["port"], "端口", 1, 65535)
-                            for path in (host.state / "temp").glob("*.env"):
-                                meta, _ = read_meta(path)
-                                require(integer(meta.get("PORT"), "来源临时端口", 1, 65535) != port,
-                                        f"来源已出现端口 {port}")
-                            data = True
-                        else:
-                            require(role == "target", "仅目标会话可执行修改")
-                            with finish_current_port() as interrupted:
-                                if op == "create":
-                                    data = host.create(request["source"], request["origin"])
-                                elif op == "balance":
-                                    data = host.balance(request["target"], request["source"], request["origin"])
-                                elif op == "delete":
-                                    data = host.delete(request["target"], request["origin"])
-                                elif op == "recover":
-                                    data = host.recover(request["record"], request["source"])
-                                else:
-                                    raise SyncError("未知 SSH 会话操作")
-                            stop = bool(interrupted)
+                        with finish_current_port() as interrupted:
+                            if op == "create":
+                                data = host.create(request["source"], request["origin"])
+                            elif op == "balance":
+                                data = host.balance(request["target"], request["source"], request["origin"])
+                            elif op == "delete":
+                                data = host.delete(request["target"], request["origin"], request["sampled_at"])
+                            elif op == "recover":
+                                data = host.recover(request["record"], request["source"])
+                            else:
+                                raise SyncError("未知 SSH 会话操作")
+                        stop = bool(interrupted)
                 send_wire(writer, dict(ok=True, result=data))
             except (SyncError, OSError, TypeError, ValueError, KeyError, IndexError, subprocess.TimeoutExpired) as exc:
                 if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
@@ -1176,13 +1304,10 @@ class Remote:
         self.close()
 
 
-def lock_both(source, target):
+def lock_target(source, target):
     require(source.ident["host"] != target.ident["host"] and source.ident["boot"] != target.ident["boot"],
             "两台 VPS 的主机标识必须不同")
-    # Order by machine identity, so reversing the requested direction doesn't
-    # reverse lock order and deadlock two concurrent mirror operations.
-    for peer in sorted((source, target), key=lambda peer: peer.ident["host"]):
-        peer.rpc("lock")
+    target.rpc("lock")
 
 
 def get_plan(source, target, wg_map, history=False):
@@ -1203,10 +1328,11 @@ def keyed_operations(plan):
     return actions
 
 
-def run_operation(source, target, origin, kind, row):
+def run_operation(source, target, source_inventory, kind, row):
+    origin = source_inventory["host"]
     if kind == "delete":
-        source.rpc("absent", port=row["port"])
-        return target.rpc("delete", target=row, origin=origin)
+        sampled_at = source.rpc("absent", port=row["port"], revision=source_inventory["source_revision"])
+        return target.rpc("delete", target=row, origin=origin, sampled_at=sampled_at)
     reference = row["source"] if kind == "balance" else row
     live = source.rpc("one", row=reference)
     if kind == "create":
@@ -1259,13 +1385,14 @@ def verify_final(source, target, before_target, outcomes):
     return issues
 
 
-def execute(source, target, initial, wg_map):
-    lock_both(source, target)
+def execute(source, target, original_source, initial, wg_map):
+    lock_target(source, target)
     before_source, before_target, current = get_plan(source, target, wg_map)
     if current["issues"]:
         show_plan(before_source, before_target, current)
         raise SyncError("加锁复检未通过，本轮尚未写入")
-    require(plan_signature(initial) == plan_signature(current), "确认后节点或配额计划有变化，重新预检即可")
+    require(before_source["source_revision"] == original_source["source_revision"]
+            and plan_signature(initial) == plan_signature(current), "确认后节点或配额计划有变化，请重新对账")
     operations = keyed_operations(current)
     outcomes = []
     failed = False
@@ -1276,10 +1403,10 @@ def execute(source, target, initial, wg_map):
         try:
             if kind == "delete" and (idx == 0 or operations[idx - 1][0] != "delete"):
                 source_again = source.rpc("inventory")
-                require(not source_again["issues"] and
-                        set(port_map(source_again)) == set(port_map(before_source)),
-                        "删除前来源审计异常或端口集合变化")
-            result = run_operation(source, target, before_source["host"], kind, row)
+                require(not source_again["issues"]
+                        and source_again["source_revision"] == before_source["source_revision"],
+                        "删除前来源审计异常或节点清单变化")
+            result = run_operation(source, target, before_source, kind, row)
             outcomes.append(result)
             report_result(result)
         except (SyncError, OSError) as exc:
@@ -1292,6 +1419,8 @@ def execute(source, target, initial, wg_map):
     try:
         a, b = source.rpc("inventory"), target.rpc("inventory")
         issues = verify_final(a, b, before_target, outcomes)
+        if a["source_revision"] != before_source["source_revision"]:
+            issues.append("来源节点清单在执行中变化，请重新对账")
         for detail in issues:
             print(f"复审冲突  {detail}", file=sys.stderr)
         failed = failed or bool(issues)
@@ -1308,9 +1437,11 @@ def recover_run(source, target, ask):
     token = f"RECOVER {pending['port']}"
     print(f"目标待恢复端口 {pending['port']}，原操作 {pending['action']}，标签 {pending['tag']}")
     require(ask(f"请输入 {token} 确认处理本轮中断操作：").strip() == token, "已取消恢复")
-    lock_both(source, target)
+    lock_target(source, target)
     data = source.rpc("inventory")
     require(not data["issues"], "来源预检异常，先核对来源")
+    if pending["action"] == "delete":
+        data["sampled_at"] = source.rpc("absent", port=pending["port"], revision=data["source_revision"])
     result = target.rpc("recover", record=pending, source=data)
     print(f"恢复  {result['port']} {result['message']}")
     final = target.rpc("inventory")
@@ -1339,7 +1470,7 @@ def synchronize(source, target, *, apply=False, recover=False, history=False, wg
         token = f"DELETE {len(plan['deletes'])}"
         require(ask(f"将原生删除 {ports_text(row['port'] for row in plan['deletes'])}。请输入 {token}：").strip()
                 == token, "已取消删除，本轮尚未写入")
-    return execute(source, target, plan, wg_map)
+    return execute(source, target, a, plan, wg_map)
 
 
 def parse_wg_mapping(values):

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import node_sync as sync
 
@@ -32,7 +33,7 @@ def node(protocol, port, tag, left=None, total=200, *, reset=0, nat=False):
 def inventory(protocol, *nodes):
     return dict(protocol=protocol, host=f"host-{protocol}", boot=f"boot-{protocol}", main=443,
                 nodes=list(nodes), issues=[], reserved=[443, *(x["port"] for x in nodes)],
-                reset_timer=True, sampled=NOW)
+                reset_timer=True, sampled=NOW, source_revision="fixture-revision")
 
 
 class Peer:
@@ -62,9 +63,11 @@ class Peer:
             row["sampled_at"] = NOW
             return row
         if op == "absent":
+            if args["revision"] != self.data["source_revision"]:
+                raise sync.SyncError("source revision changed")
             if args["port"] in sync.port_map(self.data):
                 raise sync.SyncError("source port appeared")
-            return True
+            return NOW
         if op in ("create", "balance", "delete"):
             row = args.get("target", args.get("source"))
             port = row["port"]
@@ -80,6 +83,8 @@ class Peer:
                 return dict(action=op, port=port, tag=new["tag"], expires=row["expires"], quota=new["quota"],
                             link_command=f"cat -- /controlled/{port}.url")
             if op == "delete":
+                if args["sampled_at"] != NOW:
+                    raise AssertionError("target deletion did not receive a fresh source sample")
                 self.data["nodes"] = [r for r in self.data["nodes"] if r["port"] != port]
                 return dict(action=op, port=port)
             quota = sync.port_map(self.data)[port]["quota"]
@@ -130,9 +135,8 @@ class PlanTests(unittest.TestCase):
                                               wg_map={"wg-east": "wg-target"})
                 self.assertEqual(result, 0, lines)
                 self.assertEqual(set(sync.port_map(a.data)), set(sync.port_map(b.data)))
-                self.assertEqual(events[2:], [("create", 40011), ("create", 40019),
-                                              ("balance", 40002), ("delete", 40005)])
-                self.assertEqual(sorted(events[:2]), events[:2])
+                self.assertEqual(events, [("lock", b.ident["host"]), ("create", 40011), ("create", 40019),
+                                          ("balance", 40002), ("delete", 40005)])
                 current = sync.port_map(b.data)
                 self.assertEqual(current[40002]["quota"]["left"], 51)
                 self.assertEqual(sync.schedule(current[40002]["quota"]), original)
@@ -191,8 +195,7 @@ class PlanTests(unittest.TestCase):
         answers = iter(("APPLY", "DELETE 1"))
         with self.assertRaisesRegex(sync.SyncError, "确认后"):
             self.run_case(a, b, apply=True, ask=lambda _: next(answers))
-        self.assertEqual(len(events), 2)
-        self.assertTrue(all(action == "lock" for action, _ in events))
+        self.assertEqual(events, [("lock", b.ident["host"])])
 
     def test_failed_creation_stops_the_rest_including_deletes(self):
         a, b, events = pair("vless")
@@ -200,9 +203,30 @@ class PlanTests(unittest.TestCase):
         answers = iter(("APPLY", "DELETE 1"))
         result, lines = self.run_case(a, b, apply=True, ask=lambda _: next(answers))
         self.assertEqual(result, 1)
-        self.assertEqual(events[2:], [("create", 40011)])
+        self.assertEqual(events, [("lock", b.ident["host"]), ("create", 40011)])
         self.assertIn("失败  40011", lines)
         self.assertIn("未执行  40005", lines)
+
+    def test_source_revision_change_stops_deletes_even_when_port_set_is_unchanged(self):
+        a, b, events = pair("vless")
+        original_ports = set(sync.port_map(a.data))
+        target_rpc = b.rpc
+
+        def change_source_after_balance(op, **args):
+            result = target_rpc(op, **args)
+            if op == "balance":
+                a.data["source_revision"] = "changed-source-revision"
+            return result
+
+        b.rpc = change_source_after_balance
+        answers = iter(("APPLY", "DELETE 1"))
+        result, lines = self.run_case(a, b, apply=True, ask=lambda _: next(answers))
+        self.assertEqual(result, 1, lines)
+        self.assertEqual(events, [("lock", b.ident["host"]), ("create", 40011), ("create", 40019),
+                                  ("balance", 40002)])
+        self.assertEqual(set(sync.port_map(a.data)), original_ports)
+        self.assertEqual(sync.port_map(b.data)[40002]["quota"]["left"], 60)
+        self.assertIn(40005, sync.port_map(b.data))
 
     def test_empty_good_source_can_delete_after_explicit_count(self):
         a, b, events = pair("hy2")
@@ -210,7 +234,7 @@ class PlanTests(unittest.TestCase):
         answers = iter(("APPLY", "DELETE 3"))
         result, lines = self.run_case(a, b, apply=True, ask=lambda _: next(answers))
         self.assertEqual(result, 0, lines)
-        self.assertEqual(events[2:], [("delete", 40002), ("delete", 40005), ("delete", 40013)])
+        self.assertEqual(events, [("lock", b.ident["host"]), ("delete", 40002), ("delete", 40005), ("delete", 40013)])
 
     def test_both_no_reset_are_valid_and_zero_can_be_a_balance(self):
         a, b, _ = pair("hy2")
@@ -232,6 +256,40 @@ class PlanTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_source_session_reads_inventory_and_one_without_target_operations(self):
+        row = node("hy2", 40002, "fixture", 60)
+        snapshot = inventory("hy2", row)
+        host = mock.Mock(spec=["host", "boot", "inventory", "one", "absent"])
+        host.host = snapshot["host"]
+        host.boot = snapshot["boot"]
+        host.inventory.return_value = snapshot
+        host.one.return_value = row
+        host.absent.return_value = NOW
+        factory = mock.Mock(return_value=host)
+        requests = [dict(op="hello", protocol="hy2", role="source"), dict(op="inventory"), dict(op="one", row=row),
+                    dict(op="absent", port=40005, revision=snapshot["source_revision"])]
+        denied_ops = ("lock", "prepare", "journal", "create", "balance", "delete", "recover")
+        requests.extend(dict(op=op) for op in denied_ops)
+        request_bytes = io.BytesIO()
+        for request in requests:
+            sync.send_wire(request_bytes, request)
+        request_bytes.seek(0)
+        response_bytes = io.BytesIO()
+        with mock.patch.object(sys, "stdin", mock.Mock(buffer=request_bytes)), \
+             mock.patch.object(sys, "stdout", mock.Mock(buffer=response_bytes)):
+            sync.serve(factory=factory, check_root=False)
+        factory.assert_called_once_with("hy2", role="source")
+        response_bytes.seek(0)
+        self.assertTrue(sync.read_wire(response_bytes)["ok"])
+        self.assertEqual(sync.read_wire(response_bytes), dict(ok=True, result=snapshot))
+        self.assertEqual(sync.read_wire(response_bytes), dict(ok=True, result=row))
+        self.assertEqual(sync.read_wire(response_bytes), dict(ok=True, result=NOW))
+        host.absent.assert_called_once_with(40005, snapshot["source_revision"])
+        for op in denied_ops:
+            with self.subTest(op=op):
+                self.assertFalse(sync.read_wire(response_bytes)["ok"])
+        self.assertIsNone(sync.read_wire(response_bytes))
+
     @unittest.skipUnless(os.name == "posix", "需要 Bash")
     def test_linux_readme_launcher_pins_commit_and_removes_local_download(self):
         source = Path(sync.__file__).resolve()
@@ -261,8 +319,7 @@ class ProtocolTests(unittest.TestCase):
         path = Path(sync.__file__)
         engine = path.read_bytes()
         # The local test process exercises the exact SSH stdin bootstrap without root.
-        engine = engine.replace(b"def serve(factory=Native, check_root=True):",
-                                b"def serve(factory=Native, check_root=False):")
+        engine += b"\nreal_serve = serve\nserve = lambda: real_serve(check_root=False)\n"
         proc = subprocess.Popen([sys.executable, "-IB", "-u", "-c", sync.REMOTE_BOOT],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         try:
@@ -272,10 +329,12 @@ class ProtocolTests(unittest.TestCase):
             hello = sync.read_wire(proc.stdout)
             self.assertTrue(hello["ok"], hello)
             self.assertEqual(hello["result"]["version"], sync.WIRE_VERSION)
-            sync.send_wire(proc.stdin, dict(op="delete", target={"port": 443}))
-            denied = sync.read_wire(proc.stdout)
-            self.assertFalse(denied["ok"])
-            self.assertIn("节点锁", denied["error"])
+            for op in ("lock", "prepare", "journal", "create", "balance", "delete", "recover"):
+                with self.subTest(op=op):
+                    sync.send_wire(proc.stdin, dict(op=op))
+                    denied = sync.read_wire(proc.stdout)
+                    self.assertFalse(denied["ok"], denied)
+                    self.assertIn("来源", denied["error"])
         finally:
             proc.stdin.close()
             proc.wait(timeout=5)

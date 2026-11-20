@@ -16,6 +16,7 @@ import node_sync as sync
 
 
 UPSTREAM = os.environ.get("HY2_VLESS_TEST_UPSTREAM")
+NATIVE_LIBRARIES = ("common.sh", "quota-lib.sh", "iplimit-lib.sh", "quota-query.py")
 
 
 def native_files(base, protocol):
@@ -51,10 +52,28 @@ state = json.loads(path.read_text())
 ports = state["ports"]
 args = sys.argv[1:]
 if args == ["-j", "list", "tables"]:
-    print(json.dumps({"nftables": [{"table": {"family": "inet", "name": prefix + "_pq"}}]}))
+    kinds = ["pq", "iplimit"] if state.get("family_guards") else ["pq"]
+    print(json.dumps({"nftables": [{"table": {"family": "inet", "name": f"{prefix}_{kind}"}} for kind in kinds]}))
+    raise SystemExit(0)
+if args == ["-j", "-n", "-a", "list", "table", "inet", "vr_pq"] and state.get("family_guards"):
+    table = {"family": "inet", "table": "vr_pq"}
+    objects = [{"chain": dict(table, name=f"pq_{direction}")} for direction in ("input", "output")]
+    for port, row in ports.items():
+        objects.append({"quota": dict(table, name=f"vr_pq_q_{port}", used=row["used"])})
+        for direction, used in (("in", row["used"]), ("out", 0)):
+            objects.append({"counter": dict(table, name=f"vr_pq_{direction}_{port}", bytes=used)})
+            for kind in ("count", "drop"):
+                objects.append({"rule": dict(table, chain=f"pq_{direction}put",
+                                             comment=f"vr-pq-{kind}-{direction}-{port}")})
+    print(json.dumps({"nftables": objects}))
     raise SystemExit(0)
 
 args = [a for a in args if a not in ("-a", "-n")]
+if args in (["list", "table", "inet", prefix + "_iplimit"],
+            ["list", "chain", "inet", prefix + "_iplimit", "il_input"]):
+    for port in state.get("family_guards", []):
+        print(f'drop comment "{prefix}-il-family-{port}"')
+    raise SystemExit(0)
 if args[:2] == ["list", "table"]:
     if args[-1] != prefix + "_pq":
         raise SystemExit(1)
@@ -134,7 +153,7 @@ class FixtureHost(sync.Native):
             if protocol == "hy2" and name == "common.sh":
                 data = data.replace('HY2_TEMP_CFG_DIR="$' + '{HY2_ETC_DIR}/temp"',
                                     f'HY2_TEMP_CFG_DIR="{self.config}"')
-            folder = self.lib if name in ("common.sh", "quota-lib.sh", "iplimit-lib.sh") else self.sbin
+            folder = self.lib if name in NATIVE_LIBRARIES else self.sbin
             place = folder / name
             place.write_text(data)
             place.chmod(0o755)
@@ -338,12 +357,14 @@ class NativeContracts(unittest.TestCase):
                 self.assertEqual({name: hashlib.sha256(raw).hexdigest() for name, raw in native.items()},
                                  sync.NATIVE_SHA256[protocol])
                 directory, prefix, _, _ = sync.PROTOCOLS[protocol]
-                audit = sync.audit_program(native[f"{protocol}_audit.sh"].decode(), protocol, prefix, directory)
-                self.assertNotIn("mktemp", audit)
+                original = native[f"{protocol}_audit.sh"].decode()
+                audits = [sync.audit_program(original, protocol, prefix, directory, source_only=source)
+                          for source in (False, True)]
+                self.assertTrue(all("mktemp" not in audit for audit in audits))
                 names = [f"{protocol}_mktemp.sh"]
                 if protocol == "vless":
                     names.append("vless_mktemp_nat.sh")
-                scripts = [audit] + [sync.creator_program(native[name].decode(), prefix) for name in names]
+                scripts = audits + [sync.creator_program(native[name].decode(), prefix) for name in names]
                 for script in scripts:
                     test = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
                     self.assertEqual(test.returncode, 0, test.stderr)
@@ -372,6 +393,106 @@ class NativeContracts(unittest.TestCase):
                 with host.locked():
                     invalid = host.inventory()
                 self.assertTrue(any("清单不完整" in msg for msg in invalid["issues"]))
+
+    def test_source_reads_live_node_without_opening_native_locks_for_writing(self):
+        for protocol in sync.PROTOCOLS:
+            with self.subTest(protocol=protocol):
+                self.check_read_only_source(protocol)
+
+    def check_read_only_source(self, protocol):
+        import fcntl
+        from contextlib import ExitStack
+
+        host = self.host(protocol)
+        row = host.put_node(40002, quota=200, left=90, used=11, auto=True)
+        kernel = json.loads(host.kernel.read_text())
+        kernel["family_guards"] = [row["port"]]
+        host.kernel.write_text(json.dumps(kernel))
+        tag, port = row["tag"], row["port"]
+        _, config, unit, url = host.paths(tag)
+        if protocol == "hy2":
+            config.write_text(f"listen: 127.0.0.1:{port}\n")
+        else:
+            config.write_text(json.dumps({"inbounds": [{"port": port, "protocol": protocol}]}))
+        unit.write_text(f"[Service]\nExecStart={host.sbin / (protocol + '_run_temp.sh')} {tag} {config}\n"
+                        f"ExecStopPost={host.sbin / (protocol + '_cleanup_one.sh')} {tag} --from-stop-post\n")
+        url.write_text(f"{protocol}://fixture\n")
+        subscription = host.root / f"{protocol}_temp_subscription.txt"
+        subscription.write_text(url.read_text())
+        name = f"{protocol}_temp_sub.sh"
+        host.capabilities[name] = sync.digest((host.sbin / name).read_bytes())
+        pid = os.getpid()
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text().splitlines()[0].split(":", 2)[-1]
+        host.node_files = sync.Native.node_files.__get__(host)
+        host.executable("systemctl", f'''#!/bin/bash
+if [[ "$1" == show ]]; then
+    cat <<'OUT'
+FragmentPath={unit}
+DropInPaths=
+MainPID={pid}
+ActiveState=active
+ControlGroup={cgroup}
+OUT
+else
+    printf 'active\n'
+fi
+''')
+        transport = "udp" if protocol == "hy2" else "tcp"
+        host.executable("ss", f'''#!/bin/bash
+if [[ "$*" == *-lntu* ]]; then
+    printf '{transport} '
+elif [[ "$*" == *-lunp* || "$*" == *-ltnp* ]]; then
+    printf 'LISTEN 0 128 127.0.0.1:{port} 0.0.0.0:* users:(("fixture",pid={pid},fd=3))\n'
+    exit 0
+fi
+printf 'LISTEN 0 128 127.0.0.1:{port} 0.0.0.0:*\n'
+if [[ "$*" != *-lntu* ]]; then
+    printf 'LISTEN 0 128 127.0.0.1:443 0.0.0.0:*\n'
+fi
+''')
+        checked, bash = host.checked, host.bash
+        audit_name = f"{protocol}_audit.sh"
+        host.checked = lambda name: self.refs[protocol][name].decode() if name == audit_name else checked(name)
+        host.bash = lambda script, **kwargs: bash(
+            script.replace(f"/usr/local/lib/{host.directory}", str(host.lib)).replace(
+                f"/root/{subscription.name}", str(subscription)), **kwargs)
+        host.role = "source"
+        paths = [host.runtime / name for name in ("temp.lock", host.quota_lock, "iplimit.lock")]
+        for path in paths:
+            path.unlink()
+
+        def check_inventory(wanted):
+            snapshot = host.inventory()
+            self.assertFalse(snapshot["issues"], snapshot["issues"])
+            self.assertEqual([node["port"] for node in snapshot["nodes"]], [port])
+            self.assertEqual(snapshot["nodes"][0]["quota"]["left"], wanted)
+            live = host.one(snapshot["nodes"][0])
+            self.assertEqual(live["quota"]["left"], wanted)
+            self.assertEqual(sync.schedule(live["quota"]), sync.schedule(row["quota"]))
+            self.assertIsInstance(snapshot["source_revision"], str)
+            return snapshot["source_revision"]
+
+        revision = check_inventory(90)
+        self.assertFalse(any(path.exists() for path in paths))
+
+        kernel["ports"][str(port)]["used"] += 2
+        host.kernel.write_text(json.dumps(kernel))
+        with ExitStack() as locks:
+            for path in paths:
+                path.write_text("native lock marker")
+                lock = locks.enter_context(path.open("rb"))
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = [(path.stat().st_mtime_ns, path.stat().st_ctime_ns) for path in paths]
+            self.assertEqual(check_inventory(88), revision)
+            self.assertIsInstance(host.absent(port + 1, revision), int)
+            with self.assertRaisesRegex(sync.SyncError, "来源已出现端口"):
+                host.absent(port, revision)
+            self.assertEqual([(path.stat().st_mtime_ns, path.stat().st_ctime_ns) for path in paths], before)
+            self.assertTrue(all(path.read_text() == "native lock marker" for path in paths))
+
+        url.write_text(f"{protocol}://changed\n")
+        with self.assertRaisesRegex(sync.SyncError, "来源节点清单在删除前变化"):
+            host.absent(port + 1, revision)
 
     def test_real_quota_helpers_read_exact_live_balance_and_keep_plan(self):
         for proto in sync.PROTOCOLS:
@@ -436,7 +557,7 @@ class NativeContracts(unittest.TestCase):
                 victim = host.put_node(40005)
                 survivor = host.put_node(40006)
                 with host.locked():
-                    status = host.delete(victim, "fixture-source")
+                    status = host.delete(victim, "fixture-source", int(time.time()))
                     read = host.one(survivor)
                     self.assertTrue(host.tag_absent(40005, victim["tag"]))
                 self.assertEqual(status["action"], "delete")
