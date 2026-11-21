@@ -1332,25 +1332,55 @@ def ssh_address(text):
         raise SyncError("请输入 VPS 地址或 SSH 别名") from exc
 
 
+def ssh_client_path(configured=None):
+    if configured:
+        path = Path(configured).expanduser()
+        require(path.is_absolute(), "SSH 客户端需要使用绝对路径")
+    else:
+        name = shutil.which("ssh.exe") if os.name == "nt" else shutil.which("ssh") or shutil.which("ssh.exe")
+        path = Path(name).absolute() if name else None
+    if os.name == "nt":
+        windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        native = tuple(windows / directory / "OpenSSH" / "ssh.exe" for directory in ("Sysnative", "System32"))
+        if path is None or path in native:
+            # The Windows inbox OpenSSH is in the native system directory.
+            path = next((candidate for candidate in native if candidate.is_file()), path)
+        require(path is None or path.suffix.lower() == ".exe", "Windows 需要 OpenSSH 的 ssh.exe")
+    require(path is not None, "本机需要 OpenSSH 客户端")
+    require(path.is_file(), f"找不到本机 SSH 客户端：{path}")
+    return str(path)
+
+
 class Remote:
-    def __init__(self, address, port, key, protocol, role, program):
-        ssh = shutil.which("ssh") or shutil.which("ssh.exe")
-        require(ssh, "本机需要 OpenSSH 客户端")
+    def __init__(self, address, port, key, protocol, role, program, *, ssh_client=None):
         address = ssh_address(address)
         port = integer(port, "SSH 端口", 1, 65535)
+        self.label = f"{role} {address}:{port}"
+        try:
+            ssh = ssh_client_path(ssh_client)
+        except OSError as exc:
+            raise SyncError(f"{self.label}：无法检查本机 SSH 客户端（{exc}）") from exc
         command = [ssh, "-T", "-a", "-x", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
                    "-o", "ClearAllForwardings=yes", "-o", "ControlPath=none", "-o", "ConnectTimeout=15",
                    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
         if key:
             key = Path(key).expanduser()
-            require(key.is_file(), "SSH 私钥文件不存在")
+            try:
+                require(key.is_file(), f"{self.label} 的 SSH 私钥文件不存在")
+            except OSError as exc:
+                raise SyncError(f"{self.label}：本机无法检查 SSH 私钥（{exc.strerror}）") from exc
             command += ["-o", "IdentitiesOnly=yes", "-i", str(key)]
         command += ["-p", str(port), f"root@{address}", "python3 -IB -X utf8 -u -c " + shlex.quote(REMOTE_BOOT)]
-        self.label = f"{role} {address}:{port}"
-        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         try:
-            self.process.stdin.write(str(len(program)).encode("ascii") + b"\n" + program)
-            self.process.stdin.flush()
+            self.process = subprocess.Popen(command, executable=ssh, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        except OSError as exc:
+            raise SyncError(f"{self.label}：无法在本机启动 SSH 客户端 {ssh}（{exc}）") from exc
+        try:
+            try:
+                self.process.stdin.write(str(len(program)).encode("ascii") + b"\n" + program)
+                self.process.stdin.flush()
+            except OSError as exc:
+                raise SyncError(f"{self.label}：无法通过本机 SSH 发送同步程序（{exc}）") from exc
             self.ident = self.rpc("hello", protocol=protocol, role=role)
             require(self.ident["version"] == WIRE_VERSION, "SSH 会话版本不一致")
         except BaseException:
@@ -1361,8 +1391,10 @@ class Remote:
         try:
             send_wire(self.process.stdin, dict(op=op, **fields))
             response = read_wire(self.process.stdout)
-        except (BrokenPipeError, ConnectionResetError, ValueError) as exc:
-            raise SyncError(f"{self.label} 的 SSH 连接或数据帧异常") from exc
+        except OSError as exc:
+            raise SyncError(f"{self.label} 的 SSH 连接异常（{exc}）") from exc
+        except ValueError as exc:
+            raise SyncError(f"{self.label} 的 SSH 数据帧异常") from exc
         require(response is not None, f"{self.label} 的 SSH 连接已中断")
         require(response.get("ok") is True, f"{self.label} {response.get('error', '缺少响应')}")
         return response["result"]
@@ -1586,6 +1618,7 @@ def main(argv=None):
     parser.add_argument("--key", help="两端使用的 SSH 私钥路径")
     parser.add_argument("--source-key", help="来源 VPS 私钥路径")
     parser.add_argument("--target-key", help="目标 VPS 私钥路径")
+    parser.add_argument("--ssh-client", help="本机 OpenSSH 客户端的绝对路径")
     parser.add_argument("--wg-map", action="append", default=[], help="来源接口=目标接口，可多次指定")
     parser.add_argument("--history", action="store_true", help="显示已有的每日流量")
     parser.add_argument("--details", action="store_true", help="显示精确字节数和节点参数")
@@ -1606,13 +1639,21 @@ def main(argv=None):
             input("目标 SSH 端口 [22]：").strip() or 22 if not args.target else 22)
         common_key = args.key
         default_key = Path.home() / ".ssh" / "vps_root_ed25519"
-        if not common_key and default_key.is_file():
-            common_key = default_key
-        program = Path(__file__).read_bytes()
+        try:
+            if not common_key and default_key.is_file():
+                common_key = default_key
+        except OSError as exc:
+            raise SyncError(f"无法检查本机默认 SSH 私钥（{exc.strerror}）") from exc
+        try:
+            program = Path(__file__).read_bytes()
+        except OSError as exc:
+            raise SyncError(f"无法读取本机同步程序（{exc}）") from exc
         require(len(program) <= MAX_PROGRAM, "本机程序超出 SSH 传输大小")
         wg_map = parse_wg_mapping(args.wg_map)
-        with Remote(source, source_port, args.source_key or common_key, protocol, "source", program) as a, \
-             Remote(target, target_port, args.target_key or common_key, other, "target", program) as b:
+        with Remote(source, source_port, args.source_key or common_key, protocol, "source", program,
+                    ssh_client=args.ssh_client) as a, \
+             Remote(target, target_port, args.target_key or common_key, other, "target", program,
+                    ssh_client=args.ssh_client) as b:
             return synchronize(a, b, apply=args.apply, recover=args.recover, history=args.history,
                                details=args.details, wg_map=wg_map)
     except (SyncError, OSError, EOFError) as exc:

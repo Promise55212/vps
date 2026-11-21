@@ -320,6 +320,43 @@ class PlanTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_explicit_ssh_client_reports_local_launch_denial_without_path_lookup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = Path(directory) / "OpenSSH client.exe"
+            client.touch()
+            key = Path(directory) / "private key"
+            key.touch()
+            denied = PermissionError(13, "Access is denied")
+            denied.winerror = 5
+
+            with mock.patch.object(sync.shutil, "which") as which, \
+                 mock.patch.object(sync.subprocess, "Popen", side_effect=denied) as popen, \
+                 mock.patch.object(sync.Remote, "rpc") as rpc:
+                with self.assertRaisesRegex(sync.SyncError, "无法在本机启动 SSH 客户端") as failure:
+                    sync.Remote("192.0.2.17", 2222, key, "hy2", "source", b"fixture", ssh_client=client)
+
+            which.assert_not_called()
+            rpc.assert_not_called()
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0][0], str(client))
+            self.assertEqual(popen.call_args.kwargs["executable"], str(client))
+            self.assertIn("source 192.0.2.17:2222", str(failure.exception))
+            self.assertIn(str(client), str(failure.exception))
+            self.assertNotIn(str(key), str(failure.exception))
+            self.assertIs(failure.exception.__cause__, denied)
+
+    @unittest.skipUnless(os.name == "nt", "需要 Windows 路径语义")
+    def test_explicit_windows_inbox_ssh_uses_sysnative_or_system32_in_this_process(self):
+        root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        sysnative = root / "Sysnative" / "OpenSSH" / "ssh.exe"
+        system32 = root / "System32" / "OpenSSH" / "ssh.exe"
+        for requested, available in ((system32, sysnative), (sysnative, system32)):
+            with self.subTest(requested=requested), \
+                 mock.patch.object(sync.shutil, "which") as which, \
+                 mock.patch.object(Path, "is_file", autospec=True, side_effect=lambda path: path == available):
+                self.assertEqual(sync.ssh_client_path(requested), str(available))
+                which.assert_not_called()
+
     def test_source_session_reads_inventory_and_one_without_target_operations(self):
         row = node("hy2", 40002, "fixture", 60)
         snapshot = inventory("hy2", row)
