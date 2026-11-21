@@ -308,7 +308,9 @@ class ProtocolTests(unittest.TestCase):
             curl.chmod(0o755)
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", HVS_REF=commit, HVS_TMP=str(root),
                        HVS_MARKER=str(used), HVS_ENGINE=str(source))
-            command = line.replace("OWNER/REPO", "test/repo").replace("COMMIT_SHA", commit) + " --help"
+            pinned = re.search(r" _ '[^']+?/[^']+' '[0-9a-f]{40}' --compare$", line)
+            self.assertIsNotNone(pinned, "README launcher needs a repository and a full commit SHA")
+            command = line[:pinned.start()] + f" _ 'test/repo' '{commit}' --compare --help"
             result = subprocess.run(["bash", "-c", command], env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("--apply", result.stdout)

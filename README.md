@@ -13,22 +13,24 @@
 
 ## 从 GitHub 一行启动
 
-把压缩包中 `node-sync/` 内的文件上传到你自己的仓库根目录。从 GitHub 复制该次提交的完整 40 位 SHA，替换下方的 `OWNER/REPO` 和 `COMMIT_SHA`。示例默认只读，下载文件用毕从**操作电脑**清理。
-
 ### Windows PowerShell
 
-本机使用 Windows OpenSSH 与 Python 3.8+。有 `py` 启动器时执行这一行。
+在开始菜单搜索并打开 **PowerShell**，复制下面整行，粘贴后按回车。启动器会自动下载已验收的同步脚本，并在结束时清理下载文件。电脑需要 Windows OpenSSH 和 Python 3.8+。
 
 ```powershell
-$repo='OWNER/REPO';$rev='COMMIT_SHA';if($rev -cnotmatch '^[0-9a-f]{40}$'){throw '请填写完整的 40 位小写提交 SHA'};$f=Join-Path ([IO.Path]::GetTempPath()) ('hvs-'+[guid]::NewGuid()+'.py');try{Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -OutFile $f;py -3 -IB -X utf8 $f --compare}finally{Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue}
+& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/liucong552-art/vps/main/start-sync.ps1').Content))
 ```
 
-只有 `python.exe` 时，将 `py -3` 换成 `python`。用解压文件直接运行时可以执行 `py -3 -IB -X utf8 .\node_sync.py --compare`，也可在 PowerShell 调用 `node-sync.ps1 -CompareOnly`。
+第一次启动时，按提示选择源机协议、填写两台机器的 IP 或 SSH 别名。HY2 → VLESS 的源机协议和默认 SSH 端口 22 都可以直接按回车。连接设置保存在当前 Windows 用户的本机配置中，以后粘贴同一行即可使用。
+
+- **直接回车或输入 1**。查看只读对账结果。
+- **输入 2**。先查看计划，确认后才正式同步。
+- **输入 3**。重新输入两台机器的连接设置，再做只读对账。
 
 ### Linux
 
 ```bash
-bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'OWNER/REPO' 'COMMIT_SHA' --compare
+bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'liucong552-art/vps' 'bde7adb6a630532992d8c29afadf3a37d0c713bf' --compare
 ```
 
 用解压文件直接运行时执行 `python3 -IB -X utf8 node_sync.py --compare`。
@@ -36,9 +38,9 @@ bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mkt
 ## 从对账到执行
 
 1. 先用平时的 SSH 方式登录过两台 VPS，确认它们的主机指纹在本机的 `known_hosts` 里。两台 VPS 都用各自的原生节点管理器、独立主机标识、Python 3.8+、Bash、nftables、systemd 和 root SSH。
-2. 启动时输入来源协议 `hy2` 或 `vless`、两台 VPS 及 SSH 端口。默认沿用 OpenSSH 配置，若有 `~/.ssh/vps_root_ed25519` 会优先使用。也可以传 `--key`、`--source-key` 和 `--target-key`。私钥保留在本机。
+2. Windows 启动器会记住两台 VPS 的设置。直接运行 Python 时，按提示输入来源协议、两台 VPS 及 SSH 端口。默认沿用 OpenSSH 配置，若有 `~/.ssh/vps_root_ed25519` 会优先使用。直接调用 Python 时也可以传 `--key`、`--source-key` 和 `--target-key`。
 3. 对账会独立核对两边的原生审计、文件、配额归属和监听进程，再列出端口数量、待建、待删、待调余额、无配额和冲突。一个端口只能对应一个原生临时节点。默认按相同端口匹配。通过 `--history` 可以查看各端已保存的每日流量。
-4. 正式执行把 `--compare` 换成 `--apply`。先阅读新计划，再输入 `APPLY`。如果有待删端口，按屏幕显示另输 `DELETE 数量`，例如 `DELETE 2`。取消或输错时本轮止于预检。
+4. 正式执行时，Windows 启动器选择 2。直接调用 Python 时使用 `--apply`。先阅读新计划，再输入 `APPLY`。如果有待删端口，按屏幕显示另输 `DELETE 数量`，例如 `DELETE 2`。取消或输错时本轮止于预检。
 5. 工具只锁住目标的原生节点管理，核对计划后依次创建、对齐余额、清理多余节点。目标写入沿用原生配额锁。结束后自动重新审计，并逐端口报告结果和实时余额。新节点输出在目标 root 终端查看链接的命令。
 
 来源库存不完整、任一端服务状态异常、目标端口被占用、余额超过目标总额或一端有配额而另一端无配额都会阻止写入。两端已有节点到期时间或周期设置不同且各自健康时，报告差异，目标按自己的设置继续。端口 443 和两台实际主端口受保护。
@@ -65,6 +67,7 @@ bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mkt
 ```text
 node_sync.py
 node-sync.ps1
+start-sync.ps1
 README.md
 CHANGES.md
 TESTS.md
