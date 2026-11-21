@@ -67,8 +67,13 @@ function Install-PythonManager {
     }
 }
 
-$ssh = Get-Command ssh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $ssh) { throw '这台电脑需要 Windows OpenSSH 客户端（ssh 命令）。' }
+$sshClient = Get-Command ssh.exe -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty Source
+if (-not $sshClient) {
+    $nativeSsh = Join-Path $env:SystemRoot 'Sysnative\OpenSSH\ssh.exe'
+    if (Test-Path -LiteralPath $nativeSsh -PathType Leaf) { $sshClient = $nativeSsh }
+}
+if (-not $sshClient) { throw '这台电脑需要 Windows OpenSSH 客户端（ssh 命令）。' }
 
 $windowsApps = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
 $manager = Find-PythonManager
@@ -113,11 +118,12 @@ $targetProtocol = if ($protocol -eq 'hy2') { 'vless' } else { 'hy2' }
 Write-Host ('源机 {0} {1}:{2} → 目标机 {3} {4}:{5}' -f $protocol, $source, $sourcePort, $targetProtocol, $target, $targetPort)
 
 # Pin the engine revision used by the Windows launcher.
-$engineUrl = 'https://raw.githubusercontent.com/liucong552-art/vps/dd313b7ec570c4e07adff1a3230405b84af1ba00/node_sync.py'
+$engineUrl = 'https://raw.githubusercontent.com/liucong552-art/vps/a5b82e2877cfef7249e59062b8bd1ec71a42574a/node_sync.py'
 $engine = Join-Path ([IO.Path]::GetTempPath()) ('hvs-' + [guid]::NewGuid() + '.py')
 $options = @(
     $mode, '--source-protocol', $protocol, '--source', $source, '--target', $target,
-    '--source-port', [string]$sourcePort, '--target-port', [string]$targetPort
+    '--source-port', [string]$sourcePort, '--target-port', [string]$targetPort,
+    '--ssh-client', $sshClient
 )
 if ($choice -eq '3') { $options += '--details' }
 try {

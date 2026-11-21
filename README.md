@@ -29,12 +29,12 @@
 
 启动器会检查本机的 Python。已有可用的 Python 3.8 或更新版本时直接使用，缺少时自动通过官方 Python 安装管理器为当前 Windows 用户安装最新稳定版 Python 3。安装后会继续进入菜单。
 
-新电脑还需要 Windows OpenSSH 客户端。先在这台电脑上确认能用 SSH 登录两台 VPS。
+新电脑还需要 Windows OpenSSH 客户端。启动器会调用 PowerShell 找到的 `ssh.exe`。先在这台电脑上确认能用 SSH 登录两台 VPS。
 
 ### Linux
 
 ```bash
-bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'liucong552-art/vps' 'dd313b7ec570c4e07adff1a3230405b84af1ba00' --compare
+bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'liucong552-art/vps' 'a5b82e2877cfef7249e59062b8bd1ec71a42574a' --compare
 ```
 
 用解压文件直接运行时执行 `python3 -IB -X utf8 node_sync.py --compare`。
