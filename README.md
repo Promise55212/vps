@@ -34,7 +34,7 @@
 ### Linux
 
 ```bash
-bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'liucong552-art/vps' 'aa4ad48b03d8a7871a001eeced1a0e15617b3e56' --compare
+bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'liucong552-art/vps' 'dd313b7ec570c4e07adff1a3230405b84af1ba00' --compare
 ```
 
 用解压文件直接运行时执行 `python3 -IB -X utf8 node_sync.py --compare`。
@@ -43,7 +43,7 @@ bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mkt
 
 1. 先用平时的 SSH 方式登录过两台 VPS，确认它们的主机指纹在本机的 `known_hosts` 里。两台 VPS 都用各自的原生节点管理器、独立主机标识、Python 3.8+、Bash、nftables、systemd 和 root SSH。
 2. 按提示选择来源协议、两台 VPS 及 SSH 端口。默认沿用 OpenSSH 配置，若有 `~/.ssh/vps_root_ed25519` 会优先使用。直接调用 Python 时也可以传 `--key`、`--source-key` 和 `--target-key`。
-3. 对账会核对两边的原生审计、文件、配额归属和监听进程。先看同端口、新增、删除和调整余额的数量，再看各项的分表。流量按 GiB 显示。Windows 启动器选择 **3** 或直接调用 Python 时加 `--details`，可查看精确字节数、已有节点的设置差异，以及待新增节点的 IP 上限、Sticky 秒数和 WireGuard 映射。通过 `--history` 可以查看各端已保存的每日流量。
+3. 对账会核对两边的原生审计、文件、配额归属和监听进程。先看同端口、新增、删除和调整余额的数量，再看各项的分表。流量按 GiB 显示。Windows 启动器选择 **3** 或直接调用 Python 时加 `--details`，可查看现有目标节点的端口、出口和节点标识，也可查看精确字节数、设置差异和待新增节点的详细参数。通过 `--history` 可以查看各端已保存的每日流量。
 4. 正式执行时，Windows 启动器选择 2。直接调用 Python 时使用 `--apply`。先阅读新计划，再输入 `APPLY`。如果有待删端口，按屏幕显示另输 `DELETE 数量`，例如 `DELETE 2`。取消或输错时本轮止于预检。
 5. 工具只锁住目标的原生节点管理，核对计划后依次创建、对齐余额、清理多余节点。目标写入沿用原生配额锁。结束后自动重新审计，并逐端口报告结果和实时余额。新节点输出在目标 root 终端查看链接的命令。
 
@@ -58,6 +58,7 @@ bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mkt
 - 本版本按以下上游安装器审核了原生审计、创建、清理、临时服务、配额与重置脚本。预检会逐文件核对已审核的 SHA-256。发现路径缺失或版本不符时显示路径，版本不符同时给出实际哈希。适配其他安装版时，需要其对应原生脚本内容及只读审计，才能重新验证入口。 [HY2 上游](https://github.com/liucong552-art/hy2jieshu/tree/43c7c7df729bc6e71de734eb83a6960db8de7aac) · [VLESS 上游](https://github.com/liucong552-art/jieshu/tree/1ac27d2d82c545c12b35638bd9f0ac3193c9d2b4)
 - 新建以来源 `CREATE_EPOCH`、`DURATION_SECONDS` 算同一个到期时刻，原生管理器启动服务前就装好源节点的原始总配额、本期余额、周期和绝对重置时刻。零余额会按已耗尽建立保护，等原生周期重置。密码、UUID 和入口发布资料由目标原生环境提供。
 - 使用来源的本地或 WG-NAT 出口类型、IPv4/IPv6 入站、IP 上限和 Sticky 秒数。WG-NAT 默认检查目标的同名接口及本机标记路由、握手和原生组件。接口确实对应但名字不同时，使用 `--wg-map wg-source=wg-target`。IPv6 使用目标原有的发布域名。
+- 新增节点的链接名称含有 `sync-nat-端口` 或 `sync-local-端口`，分别表示 WG-NAT 和本机出口。已有节点的出口可在详细对账的「当前目标节点」表中按端口查找。
 - 临时脚本程序通过 SSH 标准输入传输。适配器在内存中把准确时间和额度交给审核过的原生创建流程，服务器的原生脚本继续供日常业务使用。正常完成时 SSH 退出、原生锁释放，恢复记录清除。限速由目标机管理，历史流量展示已保存记录。
 
 ## 中断和恢复
