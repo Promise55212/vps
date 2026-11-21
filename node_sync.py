@@ -17,7 +17,9 @@ import signal
 import stat
 import subprocess
 import sys
+import textwrap
 import time
+import unicodedata
 import uuid
 import secrets
 import tempfile
@@ -1089,35 +1091,111 @@ def plan_signature(plan):
     )
 
 
-def show_plan(source, target, plan):
-    print(f"\n{source['protocol'].upper()} → {target['protocol'].upper()}  |  只读预检  |  北京时间")
-    print(f"来源 {source.get('total', len(source['nodes']))} 个临时节点（健康 {len(source['nodes'])}），"
-          f"目标 {target.get('total', len(target['nodes']))} 个（健康 {len(target['nodes'])}）")
-    print(f"相同端口（{len(plan['matched'])}） {ports_text(plan['matched'])}")
-    for label, field in (("待创建", "creates"), ("待删除", "deletes")):
-        print(f"{label}（{len(plan[field])}） {ports_text(row['port'] for row in plan[field]) if plan[field] else '无'}")
-    if plan["creates"]:
-        print(f"先建后删时目标预计峰值 {len(target['nodes']) + len(plan['creates'])} 个临时节点")
-    print("待调整余额 " + ports_text([item["port"] for item in plan["balances"] if item["change"]]))
-    print("无配额 来源 " + ports_text([row["port"] for row in source["nodes"] if row["quota"] is None]) +
-          "，目标 " + ports_text([row["port"] for row in target["nodes"] if row["quota"] is None]))
+def gibibytes(amount):
+    size = Decimal(amount) / (1 << 30)
+    return "<0.01" if 0 < size < Decimal("0.01") else f"{size:.2f}"
+
+
+def balance_change(before, after):
+    change = after - before
+    size = gibibytes(abs(change))
+    if size == "<0.01":
+        return f"{change:+d} B"
+    sign = "+" if change > 0 else "-"
+    return f"{sign}{size} GiB"
+
+
+def display_width(value):
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in value)
+
+
+def print_table(headers, rows):
+    cells = [headers] + [tuple(map(str, row)) for row in rows]
+    widths = [max(map(display_width, column)) for column in zip(*cells)]
+    for index, row in enumerate(cells):
+        print("  ".join(cell + " " * (width - display_width(cell))
+                        for cell, width in zip(row, widths)).rstrip())
+        if index == 0:
+            print("  ".join("-" * width for width in widths))
+
+
+def outlet(row):
+    kind = "WG-NAT" if row["landing"] == "nat" else "本机"
+    return f"{kind}/{row['family']}"
+
+
+def show_plan_details(plan):
+    print("\n详细参数")
+    for row in plan["creates"]:
+        print(f"  {row['port']}  IPv{row['family']}  IP 上限 {row['ip_limit']}  Sticky {row['sticky']} 秒")
+        if row["landing"] == "nat":
+            print(f"         WireGuard  {row['wg']} → {row['target_wg']}")
+        quota = row["quota"]
+        if quota:
+            print(f"         剩余 {quota['left']} B  总额 {quota['total']} B  重置周期 {quota['period']} 秒")
     for item in plan["balances"]:
         src, dst = item["source"]["quota"], item["target"]["quota"]
-        print(f"端口 {item['port']} 余额 {dst['left']} → {src['left']} B，目标下期总额 {dst['total']} B")
-    for row in plan["creates"]:
-        detail = f"WG-NAT {row['wg']} → {row['target_wg']}" if row["landing"] == "nat" else "本机出口"
-        quota = row["quota"]
-        budget = f"，总额 {quota['total']} B，剩余 {quota['left']} B，重置 {beijing(quota['next'])}" if quota else "，无配额"
-        print(f"端口 {row['port']} {detail}，IPv{row['family']}，IP 上限 {row['ip_limit']}，Sticky {row['sticky']} 秒，"
-              f"到期 {beijing(row['expires'])}{budget}")
+        print(f"  {item['port']}  余额 {dst['left']} B → {src['left']} B  目标总额 {dst['total']} B")
     for note in plan["notes"]:
-        print(note)
-    for issue in plan["issues"]:
-        print(f"冲突  {issue}")
+        print(f"  {note}")
+
+
+def show_history(source, target):
     for side, data in (("来源", source), ("目标", target)):
         for row in data["nodes"]:
             for day, (up, down) in sorted(row.get("history", {}).items()):
                 print(f"{side} {row['port']} {day} 上传 {up} B，下载 {down} B")
+
+
+def show_plan(source, target, plan, *, details=False):
+    print(f"\n{source['protocol'].upper()} → {target['protocol'].upper()}  |  同步计划  |  北京时间")
+    print(f"来源健康 {len(source['nodes'])}/{source.get('total', len(source['nodes']))}  |  "
+          f"目标健康 {len(target['nodes'])}/{target.get('total', len(target['nodes']))}")
+    if plan["issues"]:
+        print(f"\n预检冲突（{len(plan['issues'])}）")
+        for issue in plan["issues"]:
+            print(f"  {issue}")
+        show_history(source, target)
+        return
+
+    creates, deletes = plan["creates"], plan["deletes"]
+    adjustments = [item for item in plan["balances"] if item["change"]]
+    print(f"同端口 {len(plan['matched'])}  |  新增 {len(creates)}  |  "
+          f"删除 {len(deletes)}  |  调整余额 {len(adjustments)}")
+    if deletes:
+        print(f"\n待删除（{len(deletes)}）  目标机独有，正式同步时需单独确认")
+        print_table(("端口", "出口", "目标到期"), (
+            (row["port"], outlet(row), beijing(row["expires"])) for row in deletes))
+    if creates:
+        print(f"\n待新增（{len(creates)}）  目标机将继承来源的到期时间和配额规则")
+        if deletes:
+            print(f"先建后删，目标预计最多有 {len(target['nodes']) + len(creates)} 个临时节点。")
+        created_rows = []
+        for row in creates:
+            quota = row["quota"]
+            left, total, reset = ("无配额", "-", "-")
+            if quota:
+                left, total, reset = gibibytes(quota["left"]), gibibytes(quota["total"]), beijing(quota["next"])
+            created_rows.append((row["port"], outlet(row), left, total, beijing(row["expires"]), reset))
+        print_table(("端口", "出口", "剩余 GiB", "总额 GiB", "到期", "下次重置"), created_rows)
+    if adjustments:
+        print(f"\n待调整余额（{len(adjustments)}）  已有节点保留目标原到期和配额规则")
+        balance_rows = []
+        for item in adjustments:
+            src, dst = item["source"]["quota"], item["target"]["quota"]
+            balance_rows.append((item["port"], gibibytes(dst["left"]), gibibytes(src["left"]),
+                                 balance_change(dst["left"], src["left"]), gibibytes(dst["total"]),
+                                 beijing(dst["next"])))
+        print_table(("端口", "当前 GiB", "对齐至 GiB", "变化", "目标总额 GiB", "下次重置"), balance_rows)
+    if plan["balances"]:
+        print("正式同步会重新采样余额。")
+    if plan["uncapped"]:
+        print(f"同端口、两边均无配额：{len(plan['uncapped'])} 个，保持原样。")
+    if plan["notes"] and not details:
+        print(f"已有节点有 {len(plan['notes'])} 项到期或配额规则差异，保留目标设置。")
+    if details and (creates or plan["balances"] or plan["notes"]):
+        show_plan_details(plan)
+    show_history(source, target)
 
 
 
@@ -1346,19 +1424,23 @@ def run_operation(source, target, source_inventory, kind, row):
     return target.rpc("balance", target=row["target"], source=live, origin=origin)
 
 
-def report_result(row):
+def report_result(row, *, details=False):
     action, port = row["action"], row["port"]
     if action == "create":
-        print(f"成功  创建 {port}，到期 {beijing(row['expires'])}；在目标 root 获取链接 {row['link_command']}")
+        print(f"成功  创建 {port}  到期 {beijing(row['expires'])}")
+        print(f"      在目标 root 终端获取链接：{row['link_command']}")
     elif action == "balance":
-        print(f"成功  {port} 从 {row['before']} B 设为 {row['wanted']} B，核验实时 {row['actual']} B")
+        if details:
+            print(f"成功  {port}  余额 {row['before']} B → {row['wanted']} B  核验 {row['actual']} B")
+        else:
+            print(f"成功  {port}  余额已核验：{gibibytes(row['actual'])} GiB")
     elif action == "delete":
         print(f"成功  原生删除 {port}")
     else:
         print(f"跳过  {port} {row['message']}")
 
 
-def verify_final(source, target, before_target, outcomes):
+def verify_final(source, target, before_target, outcomes, *, details=False):
     a, b, old = port_map(source), port_map(target), port_map(before_target)
     issues = source["issues"] + target["issues"]
     if set(a) != set(b):
@@ -1375,7 +1457,7 @@ def verify_final(source, target, before_target, outcomes):
                 result["quota"]["stored"] if result["quota"] else None)
             if ceiling is not None and (q is None or q["left"] > ceiling):
                 issues.append(f"端口 {port} 复审余额高于本轮设置值")
-            if q:
+            if details and q:
                 print(f"复审  {port} 实时 {q['left']} B、下期总额 {q['total']} B、重置 {beijing(q['next'])}")
         if kind == "create" and port in b and port in a:
             inherited = ("port", "expires", "landing", "family", "ip_limit", "sticky")
@@ -1385,11 +1467,11 @@ def verify_final(source, target, before_target, outcomes):
     return issues
 
 
-def execute(source, target, original_source, initial, wg_map):
+def execute(source, target, original_source, initial, wg_map, *, details=False):
     lock_target(source, target)
     before_source, before_target, current = get_plan(source, target, wg_map)
     if current["issues"]:
-        show_plan(before_source, before_target, current)
+        show_plan(before_source, before_target, current, details=details)
         raise SyncError("加锁复检未通过，本轮尚未写入")
     require(before_source["source_revision"] == original_source["source_revision"]
             and plan_signature(initial) == plan_signature(current), "确认后节点或配额计划有变化，请重新对账")
@@ -1408,7 +1490,7 @@ def execute(source, target, original_source, initial, wg_map):
                         "删除前来源审计异常或节点清单变化")
             result = run_operation(source, target, before_source, kind, row)
             outcomes.append(result)
-            report_result(result)
+            report_result(result, details=details)
         except (SyncError, OSError) as exc:
             print(f"失败  {port} {exc}", file=sys.stderr)
             for later_kind, later in operations[idx + 1:]:
@@ -1418,7 +1500,7 @@ def execute(source, target, original_source, initial, wg_map):
     print("\n重新审计两端")
     try:
         a, b = source.rpc("inventory"), target.rpc("inventory")
-        issues = verify_final(a, b, before_target, outcomes)
+        issues = verify_final(a, b, before_target, outcomes, details=details)
         if a["source_revision"] != before_source["source_revision"]:
             issues.append("来源节点清单在执行中变化，请重新对账")
         for detail in issues:
@@ -1450,17 +1532,17 @@ def recover_run(source, target, ask):
     return 1 if final["issues"] else 0
 
 
-def synchronize(source, target, *, apply=False, recover=False, history=False, wg_map=None, ask=input):
+def synchronize(source, target, *, apply=False, recover=False, history=False, details=False, wg_map=None, ask=input):
     wg_map = wg_map or {}
     if recover:
         return recover_run(source, target, ask)
     a, b, plan = get_plan(source, target, wg_map, history)
-    show_plan(a, b, plan)
+    show_plan(a, b, plan, details=details)
     if plan["issues"]:
         print("预检存在冲突，本轮尚未写入")
         return 1
     if not apply:
-        print("只读对账完成。需要修改时以 --apply 运行并审阅本轮确认。")
+        print("\n只读对账完成，未修改节点。")
         return 0
     if not keyed_operations(plan):
         print("端口集合和无配额节点已对齐")
@@ -1468,9 +1550,11 @@ def synchronize(source, target, *, apply=False, recover=False, history=False, wg
     require(ask("请输入 APPLY 确认执行本轮同步：").strip() == "APPLY", "已取消修改")
     if plan["deletes"]:
         token = f"DELETE {len(plan['deletes'])}"
-        require(ask(f"将原生删除 {ports_text(row['port'] for row in plan['deletes'])}。请输入 {token}：").strip()
-                == token, "已取消删除，本轮尚未写入")
-    return execute(source, target, a, plan, wg_map)
+        print("待从目标机删除的端口：")
+        print(textwrap.fill(ports_text(row["port"] for row in plan["deletes"]),
+                            width=76, initial_indent="  ", subsequent_indent="  "))
+        require(ask(f"请输入 {token} 确认删除：").strip() == token, "已取消删除，本轮尚未写入")
+    return execute(source, target, a, plan, wg_map, details=details)
 
 
 def parse_wg_mapping(values):
@@ -1496,6 +1580,7 @@ def main(argv=None):
     parser.add_argument("--target-key", help="目标 VPS 私钥路径")
     parser.add_argument("--wg-map", action="append", default=[], help="来源接口=目标接口，可多次指定")
     parser.add_argument("--history", action="store_true", help="显示已有的每日流量")
+    parser.add_argument("--details", action="store_true", help="显示精确字节数和节点参数")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--apply", action="store_true", help="预检及明确确认后执行")
     modes.add_argument("--compare", action="store_true", help="只读对账（默认）")
@@ -1520,7 +1605,8 @@ def main(argv=None):
         wg_map = parse_wg_mapping(args.wg_map)
         with Remote(source, source_port, args.source_key or common_key, protocol, "source", program) as a, \
              Remote(target, target_port, args.target_key or common_key, other, "target", program) as b:
-            return synchronize(a, b, apply=args.apply, recover=args.recover, history=args.history, wg_map=wg_map)
+            return synchronize(a, b, apply=args.apply, recover=args.recover, history=args.history,
+                               details=args.details, wg_map=wg_map)
     except (SyncError, OSError, EOFError) as exc:
         print(f"操作停止  {exc}", file=sys.stderr)
         return 1

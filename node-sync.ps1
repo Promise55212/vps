@@ -6,7 +6,7 @@ param(
     [ValidateRange(1, 65535)][int] $TargetPort,
     [string] $Key, [string] $SourceKey, [string] $TargetKey,
     [string[]] $WgMap = @(),
-    [switch] $Apply, [switch] $CompareOnly, [switch] $Recover, [switch] $History
+    [switch] $Apply, [switch] $CompareOnly, [switch] $Recover, [switch] $History, [switch] $Details
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +28,7 @@ if ($Apply) { $options += '--apply' }
 if ($CompareOnly) { $options += '--compare' }
 if ($Recover) { $options += '--recover' }
 if ($History) { $options += '--history' }
+if ($Details) { $options += '--details' }
 
 $launcher = Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue
 if ($launcher) {

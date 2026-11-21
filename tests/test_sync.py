@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -121,8 +122,51 @@ class PlanTests(unittest.TestCase):
         result, lines = self.run_case(a, b)
         self.assertEqual(result, 0)
         self.assertFalse(changes)
-        for token in ("相同端口（2） 40002, 40013", "待创建（2） 40011, 40019", "待删除（1） 40005"):
+        for token in ("同端口 2  |  新增 2  |  删除 1  |  调整余额 1", "待新增（2）", "待删除（1）", "待调整余额（1）"):
             self.assertIn(token, lines)
+        self.assertRegex(lines, r"(?m)^40005\s+本机/4")
+        self.assertRegex(lines, r"(?m)^40011\s+WG-NAT/6")
+        self.assertRegex(lines, r"(?m)^40019\s+本机/4")
+        self.assertRegex(lines, r"(?m)^40002\s+<0\.01\s+<0\.01\s+-35 B")
+
+    def test_default_plan_shows_18_additions_once_in_narrow_rows(self):
+        gib = 1 << 30
+        ports = list(range(41001, 41019))
+        reset = NOW + 80000
+        nodes = [node("vless", ports[0], "uncapped"), node("vless", ports[1], "exhausted", 0, 200 * gib)]
+        nodes.extend(node("vless", port, f"capped-{port}", 80 * gib + gib // 2, 200 * gib, reset=reset, nat=True)
+                     for port in ports[2:])
+        changes = []
+        result, output = self.run_case(Peer(inventory("vless", *nodes), changes), Peer(inventory("hy2"), changes))
+        self.assertEqual(result, 0)
+        self.assertFalse(changes)
+        self.assertIn("同端口 0  |  新增 18  |  删除 0  |  调整余额 0", output)
+        self.assertIn("待新增（18）", output)
+        self.assertIn("剩余 GiB", output)
+        self.assertIn("总额 GiB", output)
+        self.assertNotIn("待删除（", output)
+        self.assertNotIn("待调整余额（", output)
+        self.assertEqual(re.findall(r"\b410\d{2}\b", output), list(map(str, ports)))
+        self.assertRegex(output, r"(?m)^41001\s+本机/4\s+无配额")
+        self.assertRegex(output, r"(?m)^41002\s+本机/4\s+0\.00\s+200\.00")
+        self.assertRegex(output, r"(?m)^41003\s+WG-NAT/6\s+80\.50\s+200\.00\s+")
+        self.assertIn(sync.beijing(nodes[2]["expires"]), output)
+        self.assertIn(sync.beijing(reset), output)
+        for line in output.splitlines():
+            width = sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in line)
+            self.assertLessEqual(width, 80, line)
+
+    def test_details_show_exact_quota_and_native_ip_and_wireguard_settings(self):
+        a, b, changes = pair("hy2")
+        wg_map = {"wg-east": "wg-target"}
+        result, compact = self.run_case(a, b, wg_map=wg_map)
+        extended, details = self.run_case(a, b, wg_map=wg_map, details=True)
+        self.assertEqual((result, extended), (0, 0))
+        self.assertFalse(changes)
+        for token in ("详细参数", "IPv6  IP 上限 3  Sticky 150 秒", "WireGuard  wg-east → wg-target",
+                      "剩余 0 B  总额 120 B  重置周期 2592000 秒", "余额 95 B → 60 B  目标总额 100 B"):
+            self.assertNotIn(token, compact)
+            self.assertIn(token, details)
 
     def test_both_directions_create_delete_and_keep_target_cycle(self):
         for origin in ("hy2", "vless"):
