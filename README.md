@@ -27,7 +27,9 @@
 2. 选择同步方向。输入 **1** 是 HY2 → VLESS，输入 **2** 是 VLESS → HY2。
 3. 输入本次源机和目标机的 IP 或 SSH 别名。SSH 端口为 22 时直接回车。下次启动会重新询问这两台机器。
 
-新电脑需要 Python 3.8 或更新版本，以及 Windows OpenSSH 客户端。先在这台电脑上确认能用 SSH 登录两台 VPS。
+启动器会检查本机的 Python。已有可用的 Python 3.8 或更新版本时直接使用，缺少时自动通过官方 Python 安装管理器为当前 Windows 用户安装最新稳定版 Python 3。安装后会继续进入菜单。
+
+新电脑还需要 Windows OpenSSH 客户端。先在这台电脑上确认能用 SSH 登录两台 VPS。
 
 ### Linux
 
