@@ -88,8 +88,9 @@ if (-not $python) {
 
 Write-Host '1  只读对账（直接回车）'
 Write-Host '2  正式同步（先看计划，再确认写入）'
+Write-Host '3  详细对账（含精确字节和节点参数）'
 $choice = ([string](Read-Host '请选择')).Trim()
-if ($choice -notin @('', '1', '2')) { throw '请输入 1 或 2。' }
+if ($choice -notin @('', '1', '2', '3')) { throw '请输入 1、2 或 3。' }
 
 $direction = ([string](Read-Host '同步方向（1 = HY2 → VLESS，2 = VLESS → HY2）')).Trim()
 $protocol = switch ($direction) {
@@ -111,13 +112,14 @@ if ($choice -eq '2') { $mode = '--apply' }
 $targetProtocol = if ($protocol -eq 'hy2') { 'vless' } else { 'hy2' }
 Write-Host ('源机 {0} {1}:{2} → 目标机 {3} {4}:{5}' -f $protocol, $source, $sourcePort, $targetProtocol, $target, $targetPort)
 
-# Keep the launcher on the engine revision recorded in LIVE_TEST.md.
-$engineUrl = 'https://raw.githubusercontent.com/liucong552-art/vps/bde7adb6a630532992d8c29afadf3a37d0c713bf/node_sync.py'
+# Pin the engine revision used by the Windows launcher.
+$engineUrl = 'https://raw.githubusercontent.com/liucong552-art/vps/aa4ad48b03d8a7871a001eeced1a0e15617b3e56/node_sync.py'
 $engine = Join-Path ([IO.Path]::GetTempPath()) ('hvs-' + [guid]::NewGuid() + '.py')
 $options = @(
     $mode, '--source-protocol', $protocol, '--source', $source, '--target', $target,
     '--source-port', [string]$sourcePort, '--target-port', [string]$targetPort
 )
+if ($choice -eq '3') { $options += '--details' }
 try {
     Invoke-WebRequest -UseBasicParsing -Uri $engineUrl -OutFile $engine -TimeoutSec 30
     & $python -IB -X utf8 $engine @options
