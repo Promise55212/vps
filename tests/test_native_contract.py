@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from urllib.parse import unquote, urlsplit
 
 import node_sync as sync
 
@@ -616,6 +617,13 @@ fi
                     result = host.create(source, "fixture-source")
                 self.assertEqual(result["port"], 40011)
                 self.assertEqual(result["expires"], source["expires"])
+                self.assertEqual(result["landing"], mode)
+                tag = result["tag"]
+                self.assertRegex(tag, rf"^{protocol}-temp-sync-{mode}-40011-[0-9a-f]{{10}}$")
+                link = host.paths(tag)[3].read_text().strip()
+                name = unquote(urlsplit(link).fragment)
+                expected_name = tag.replace("hy2-temp-", "hy2-nat-", 1) if protocol == "hy2" and mode == "nat" else tag
+                self.assertEqual(name, expected_name)
                 self.assertEqual(result["quota"]["left"], 0)
                 self.assertEqual(sync.schedule(result["quota"]), sync.schedule(source["quota"]))
                 self.assertIn("cat -- ", result["link_command"])

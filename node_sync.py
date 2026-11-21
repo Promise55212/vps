@@ -878,7 +878,7 @@ class Native:
         port = source["port"]
         name, script, options = self.prepare_create(source)
         require(port not in self.occupied_ports() and port not in self.managed_rules(), f"端口 {port} 已被占用")
-        identifier = f"sync-{port}-{secrets.token_hex(5)}"
+        identifier = f"sync-{source['landing']}-{port}-{secrets.token_hex(5)}"
         tag = self.tag_prefix + identifier
         self.port_unowned(port, tag)
         require(all(not (p.exists() or p.is_symlink()) for p in self.paths(tag)), f"目标标签 {tag} 已存在")
@@ -931,6 +931,7 @@ class Native:
             raise SyncError(f"创建失败，已清除本次节点（{safe_error(exc)}）") from exc
         self.complete()
         return dict(port=port, action="create", tag=tag, expires=row["expires"], quota=row["quota"],
+                    landing=row["landing"], family=row["family"],
                     link_command=f"cat -- {shlex.quote(str(self.paths(tag)[3]))}")
 
     def balance(self, expected, source, origin):
@@ -1124,7 +1125,14 @@ def outlet(row):
     return f"{kind}/{row['family']}"
 
 
-def show_plan_details(plan):
+def show_plan_details(plan, target):
+    if target["nodes"]:
+        print("\n当前目标节点")
+        print_table(("端口", "出口", "节点标识"), (
+            (row["port"], outlet(row), row["tag"])
+            for row in sorted(target["nodes"], key=lambda row: row["port"])))
+    if not (plan["creates"] or plan["balances"] or plan["notes"]):
+        return
     print("\n详细参数")
     for row in plan["creates"]:
         print(f"  {row['port']}  IPv{row['family']}  IP 上限 {row['ip_limit']}  Sticky {row['sticky']} 秒")
@@ -1193,8 +1201,8 @@ def show_plan(source, target, plan, *, details=False):
         print(f"同端口、两边均无配额：{len(plan['uncapped'])} 个，保持原样。")
     if plan["notes"] and not details:
         print(f"已有节点有 {len(plan['notes'])} 项到期或配额规则差异，保留目标设置。")
-    if details and (creates or plan["balances"] or plan["notes"]):
-        show_plan_details(plan)
+    if details:
+        show_plan_details(plan, target)
     show_history(source, target)
 
 
@@ -1427,7 +1435,7 @@ def run_operation(source, target, source_inventory, kind, row):
 def report_result(row, *, details=False):
     action, port = row["action"], row["port"]
     if action == "create":
-        print(f"成功  创建 {port}  到期 {beijing(row['expires'])}")
+        print(f"成功  创建 {port}  {outlet(row)}  到期 {beijing(row['expires'])}")
         print(f"      在目标 root 终端获取链接：{row['link_command']}")
     elif action == "balance":
         if details:

@@ -82,6 +82,7 @@ class Peer:
                 new["generation"] = f"new-generation-{port}"
                 self.data["nodes"].append(new)
                 return dict(action=op, port=port, tag=new["tag"], expires=row["expires"], quota=new["quota"],
+                            landing=new["landing"], family=new["family"],
                             link_command=f"cat -- /controlled/{port}.url")
             if op == "delete":
                 if args["sampled_at"] != NOW:
@@ -168,6 +169,23 @@ class PlanTests(unittest.TestCase):
             self.assertNotIn(token, compact)
             self.assertIn(token, details)
 
+    def test_details_show_existing_target_nodes_even_when_no_changes_are_needed(self):
+        changes = []
+        a = Peer(inventory("hy2", node("hy2", 40011, "nat-source", nat=True),
+                           node("hy2", 40019, "local-source")), changes)
+        b = Peer(inventory("vless", node("vless", 40019, "sync-40019-deadbeef01"),
+                           node("vless", 40011, "sync-40011-deadbeef02", nat=True)), changes)
+        result, compact = self.run_case(a, b)
+        extended, details = self.run_case(a, b, details=True)
+        self.assertEqual((result, extended), (0, 0))
+        self.assertFalse(changes)
+        self.assertIn("同端口 2  |  新增 0  |  删除 0  |  调整余额 0", details)
+        self.assertNotIn("当前目标节点", compact)
+        self.assertIn("当前目标节点", details)
+        self.assertRegex(details, r"(?m)^端口 +出口 +节点标识$")
+        self.assertRegex(details, r"(?m)^40011 +WG-NAT/6 +vless-temp-sync-40011-deadbeef02$")
+        self.assertRegex(details, r"(?m)^40019 +本机/4 +vless-temp-sync-40019-deadbeef01$")
+
     def test_both_directions_create_delete_and_keep_target_cycle(self):
         for origin in ("hy2", "vless"):
             with self.subTest(origin=origin):
@@ -188,6 +206,8 @@ class PlanTests(unittest.TestCase):
                 self.assertEqual(current[40011]["target_wg"], "wg-target")
                 self.assertEqual(current[40011]["quota"]["left"], 0)
                 self.assertIsNone(current[40019]["quota"])
+                self.assertIn("成功  创建 40011  WG-NAT/6", lines)
+                self.assertIn("成功  创建 40019  本机/4", lines)
                 self.assertIn("来源余额已变化", lines)
                 self.assertIn("同步完成", lines)
 
