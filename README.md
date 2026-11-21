@@ -15,17 +15,19 @@
 
 ### Windows PowerShell
 
-在开始菜单搜索并打开 **PowerShell**，复制下面整行，粘贴后按回车。启动器会自动下载已验收的同步脚本，并在结束时清理下载文件。电脑需要 Windows OpenSSH 和 Python 3.8+。
+在开始菜单搜索并打开 **PowerShell**，复制下面整行，粘贴后按回车。启动器会自动下载已验收的同步脚本，并在结束时清理下载文件。
 
 ```powershell
-& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/liucong552-art/vps/main/start-sync.ps1').Content))
+& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/liucong552-art/vps/refs/heads/main/start-sync.ps1').Content.TrimStart([char]0xFEFF)))
 ```
 
-第一次启动时，按提示选择源机协议、填写两台机器的 IP 或 SSH 别名。HY2 → VLESS 的源机协议和默认 SSH 端口 22 都可以直接按回车。连接设置保存在当前 Windows 用户的本机配置中，以后粘贴同一行即可使用。
+每次都用同一行启动，按以下顺序选择：
 
-- **直接回车或输入 1**。查看只读对账结果。
-- **输入 2**。先查看计划，确认后才正式同步。
-- **输入 3**。重新输入两台机器的连接设置，再做只读对账。
+1. 直接回车或输入 **1** 查看对账。输入 **2** 进入正式同步，工具会先显示计划。
+2. 选择同步方向。输入 **1** 是 HY2 → VLESS，输入 **2** 是 VLESS → HY2。
+3. 输入本次源机和目标机的 IP 或 SSH 别名。SSH 端口为 22 时直接回车。下次启动会重新询问这两台机器。
+
+新电脑需要 Python 3.8 或更新版本，以及 Windows OpenSSH 客户端。先在这台电脑上确认能用 SSH 登录两台 VPS。
 
 ### Linux
 
@@ -38,7 +40,7 @@ bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mkt
 ## 从对账到执行
 
 1. 先用平时的 SSH 方式登录过两台 VPS，确认它们的主机指纹在本机的 `known_hosts` 里。两台 VPS 都用各自的原生节点管理器、独立主机标识、Python 3.8+、Bash、nftables、systemd 和 root SSH。
-2. Windows 启动器会记住两台 VPS 的设置。直接运行 Python 时，按提示输入来源协议、两台 VPS 及 SSH 端口。默认沿用 OpenSSH 配置，若有 `~/.ssh/vps_root_ed25519` 会优先使用。直接调用 Python 时也可以传 `--key`、`--source-key` 和 `--target-key`。
+2. 按提示选择来源协议、两台 VPS 及 SSH 端口。默认沿用 OpenSSH 配置，若有 `~/.ssh/vps_root_ed25519` 会优先使用。直接调用 Python 时也可以传 `--key`、`--source-key` 和 `--target-key`。
 3. 对账会独立核对两边的原生审计、文件、配额归属和监听进程，再列出端口数量、待建、待删、待调余额、无配额和冲突。一个端口只能对应一个原生临时节点。默认按相同端口匹配。通过 `--history` 可以查看各端已保存的每日流量。
 4. 正式执行时，Windows 启动器选择 2。直接调用 Python 时使用 `--apply`。先阅读新计划，再输入 `APPLY`。如果有待删端口，按屏幕显示另输 `DELETE 数量`，例如 `DELETE 2`。取消或输错时本轮止于预检。
 5. 工具只锁住目标的原生节点管理，核对计划后依次创建、对齐余额、清理多余节点。目标写入沿用原生配额锁。结束后自动重新审计，并逐端口报告结果和实时余额。新节点输出在目标 root 终端查看链接的命令。

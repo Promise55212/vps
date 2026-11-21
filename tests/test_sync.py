@@ -342,6 +342,11 @@ class ProtocolTests(unittest.TestCase):
             proc.wait(timeout=5)
             proc.stdout.close()
 
+    def test_windows_launcher_has_no_bom_for_powershell_scriptblock(self):
+        launcher = Path(sync.__file__).resolve().with_name("start-sync.ps1")
+        # Windows PowerShell 5.1 preserves the BOM in Invoke-WebRequest.Content.
+        self.assertFalse(launcher.read_bytes().startswith(b"\xef\xbb\xbf"))
+
     def test_malformed_frame_and_duplicate_wg_config(self):
         with self.assertRaisesRegex(sync.SyncError, "数据帧"):
             sync.read_wire(io.BytesIO(b'{"op":"hello"}'))
