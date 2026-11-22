@@ -320,6 +320,26 @@ class PlanTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_classified_hy2_creator_pin_is_specific_and_accepts_legacy(self):
+        host = object.__new__(sync.Native)
+        host.protocol = "hy2"
+        host.sbin = Path("/fixture/sbin")
+        host.capabilities = sync.NATIVE_SHA256["hy2"]
+        file_info = mock.Mock(st_uid=0, st_mode=0o755)
+        data = b"fixture creator"
+        with mock.patch.object(sync, "read_file", return_value=(data, file_info)), \
+             mock.patch.object(sync.os, "geteuid", return_value=0, create=True), \
+             mock.patch.object(sync, "digest") as digest:
+            digest.return_value = host.capabilities["hy2_mktemp.sh"]
+            self.assertEqual(host.checked("hy2_mktemp.sh"), data.decode())
+            digest.return_value = sync.HY2_CLASSIFIED_CREATOR_SHA256
+            self.assertEqual(host.checked("hy2_mktemp.sh"), data.decode())
+            with self.assertRaises(sync.SyncError):
+                host.checked("hy2_cleanup_one.sh")
+            digest.return_value = "0" * 64
+            with self.assertRaises(sync.SyncError):
+                host.checked("hy2_mktemp.sh")
+
     def test_explicit_ssh_client_reports_local_launch_denial_without_path_lookup(self):
         with tempfile.TemporaryDirectory() as directory:
             client = Path(directory) / "OpenSSH client.exe"

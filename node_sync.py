@@ -153,6 +153,7 @@ NATIVE_SHA256 = {
         "pq_reset_due.sh": "390f7469aafe8a16845b9f3e662bc10df4326d985b51376abe1788a5e6c765e1",
     }
 }
+HY2_CLASSIFIED_CREATOR_SHA256 = "9a27cddde23c70b1482dc75840d9a264a24707d97fd1594627352f89a8b1bca3"
 SCHEDULE = {
     "total": "ORIGINAL_LIMIT_BYTES",
     "period": "RESET_INTERVAL_SECONDS",
@@ -382,7 +383,9 @@ class Native:
         data, info = read_file(path)
         hash_value = digest(data)
         require(info.st_uid == os.geteuid() and not info.st_mode & 0o022, f"{path} 所有者或权限异常")
-        require(hash_value == self.capabilities.get(name), f"未适配原生文件 {path}（SHA-256 {hash_value}）")
+        classified_creator = self.protocol == "hy2" and name == "hy2_mktemp.sh" and hash_value == HY2_CLASSIFIED_CREATOR_SHA256
+        require(hash_value == self.capabilities.get(name) or classified_creator,
+                f"未适配原生文件 {path}（SHA-256 {hash_value}）")
         return data.decode("utf-8")
 
     def locked(self):
@@ -762,7 +765,9 @@ class Native:
             options.update(self.wg_settings(interface, row["handshake"]))
             if self.protocol == "vless":
                 name = "vless_mktemp_nat.sh"
-        script = creator_program(self.checked(name), self.prefix)
+        native = self.checked(name)
+        classified_hy2 = self.protocol == "hy2" and digest(native.encode()) == HY2_CLASSIFIED_CREATOR_SHA256
+        script = creator_program(native, self.prefix)
         self.run(("/bin/bash", "--noprofile", "--norc", "-n"), data=script)
         if row["quota"] and row["quota"]["period"]:
             self.run(("systemctl", "is-active", "--quiet", "pq-reset.timer"))
@@ -772,7 +777,7 @@ class Native:
             matches = re.findall(rf"^\s*{key}\s*=(.*)$", read_file(defaults)[0].decode("utf-8"), re.M)
             require(len(matches) == 1 and matches[0].strip().strip('"\''),
                     f"目标缺少 {key}，无法转换 IPv6 发布地址")
-        return name, script, options
+        return name, script, options, classified_hy2
 
     def port_unowned(self, port, tag):
         """Check actual native metadata before calling a cleanup, even during recovery."""
@@ -876,9 +881,12 @@ class Native:
 
     def create(self, source, origin):
         port = source["port"]
-        name, script, options = self.prepare_create(source)
+        name, script, options, classified_hy2 = self.prepare_create(source)
         require(port not in self.occupied_ports() and port not in self.managed_rules(), f"端口 {port} 已被占用")
         identifier = f"sync-{source['landing']}-{port}-{secrets.token_hex(5)}"
+        if classified_hy2:
+            kind = "nat" if source["landing"] == "nat" else "tmp"
+            identifier = f"{kind}-{identifier}"
         tag = self.tag_prefix + identifier
         self.port_unowned(port, tag)
         require(all(not (p.exists() or p.is_symlink()) for p in self.paths(tag)), f"目标标签 {tag} 已存在")
@@ -1275,7 +1283,7 @@ def serve(factory=Native, check_root=True):
                                 data = []
                                 for row in request["rows"]:
                                     try:
-                                        name, _, _ = host.prepare_create(row)
+                                        name, _, _, _ = host.prepare_create(row)
                                         data.append(dict(port=row["port"], native=name))
                                     except (SyncError, OSError, ValueError, KeyError, TypeError,
                                             subprocess.TimeoutExpired) as exc:
