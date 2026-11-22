@@ -40,4 +40,4 @@ HY2_VLESS_TEST_UPSTREAM=/path/to/read-only-upstream-copies python3 -B -m unittes
 
 可以指定 `HY2_VLESS_TEST_TMP` 使用一个已经存在的本地临时目录。测试只调用这次模拟的原生资源。
 
-另设 `HY2_VLESS_TEST_CLASSIFIED_INSTALLER=/path/to/new/hy2.sh`，可使用[新版 HY2 安装器](https://raw.githubusercontent.com/liucong552-art/hy2jieshu/1d16b2145db4e7132a0a91fba27558fba3dc8c67/hy2.sh)验证新前缀的创建及启动失败回滚。上表的旧版安装器用于验证兼容性。
+另设 `HY2_VLESS_TEST_CLASSIFIED_INSTALLER=/path/to/new/hy2.sh`，可用[新版 HY2 安装器](https://raw.githubusercontent.com/liucong552-art/hy2jieshu/1d16b2145db4e7132a0a91fba27558fba3dc8c67/hy2.sh)核对哈希和适配后创建器的 Bash 语法。普通测试模拟新前缀节点的启动失败，验证创建前检查、恢复记录和清理使用同一节点标签。上表的旧版安装器用于验证兼容性。

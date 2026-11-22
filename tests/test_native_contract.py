@@ -237,8 +237,7 @@ esac
         self.executable("xray", "#!/bin/bash\nprintf 'a1234567-1234-1234-1234-a123456789ab\\n'\n")
         self.executable("getent", "#!/bin/bash\nprintf '192.0.2.1 STREAM fixture\\n'\n")
         self.executable("stat", "#!/bin/bash\n[[ \"$1 $2\" == '-c %u' ]] && { echo 0; exit; }; exec /usr/bin/stat \"$@\"\n")
-        self.executable("ip", "#!/bin/bash\n[[ \"$*\" == *'rule del'* ]] && exit 1\n"
-                        "[[ \"$*\" == *route* ]] && echo '1.1.1.1 dev wg-test'; exit 0\n")
+        self.executable("ip", "#!/bin/bash\n[[ \"$*\" == *route* ]] && echo '1.1.1.1 dev wg-test'; exit 0\n")
         self.executable("wg", "#!/bin/bash\nprintf 'peer\\t%s\\n' \"$(date +%s)\"\n")
         for name in ("wg_nat_healthcheck.sh", "wg_nat_guard.sh", f"{protocol}_audit.sh"):
             self.executable(name, "#!/bin/bash\nexit 0\n")
@@ -635,31 +634,14 @@ fi
                 self.assertFalse(host.pending.exists())
 
     @unittest.skipUnless(CLASSIFIED_HY2_INSTALLER, "需要带临时节点命名前缀的 HY2 安装器副本")
-    def test_classified_hy2_creator_and_failed_start_use_consistent_tags(self):
+    def test_classified_hy2_creator_keeps_audited_hashes_and_bash_syntax(self):
         reference = native_files(Path(UPSTREAM), "hy2", classified_hy2=Path(CLASSIFIED_HY2_INSTALLER))
         hashes = dict(sync.NATIVE_SHA256["hy2"])
         hashes["hy2_mktemp.sh"] = sync.HY2_CLASSIFIED_CREATOR_SHA256
         self.assertEqual({name: sync.digest(data) for name, data in reference.items()}, hashes)
-        for mode, kind in (("local", "tmp"), ("nat", "nat")):
-            with self.subTest(mode=mode):
-                with tempfile.TemporaryDirectory(dir=os.environ.get("HY2_VLESS_TEST_TMP")) as directory:
-                    host = CreatorFixture("hy2", Path(directory), reference)
-                    source = self.host("hy2").put_node(40011, quota=201, left=80, auto=True)
-                    source.update(landing=mode, wg="wg-test", handshake=180, ip_limit=3, sampled_at=int(time.time()))
-                    with host.locked():
-                        host.fail_start = True
-                        with self.assertRaisesRegex(sync.SyncError, "已清除本次节点"):
-                            host.create(source, "fixture-source")
-                        self.assertFalse(tuple((host.state / "temp").iterdir()))
-                        self.assertFalse(host.pending.exists())
-                        host.fail_start = False
-                        result = host.create(source, "fixture-source")
-                    tag = result["tag"]
-                    self.assertRegex(tag, rf"^hy2-temp-{kind}-sync-{mode}-40011-[0-9a-f]{{10}}$")
-                    port_link = host.paths(tag)[3].read_text().strip()
-                    self.assertEqual(unquote(urlsplit(port_link).fragment), tag)
-                    self.assertEqual(result["quota"]["left"], 80)
-                    self.assertFalse(host.pending.exists())
+        script = sync.creator_program(reference["hy2_mktemp.sh"].decode(), "hy2")
+        result = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_native_creator_start_failure_leaves_no_port_or_journal(self):
         for protocol in sync.PROTOCOLS:

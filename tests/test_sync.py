@@ -320,6 +320,34 @@ class PlanTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_creator_uses_same_tag_for_conflict_checks_recovery_and_cleanup(self):
+        cases = (("hy2", "local", True, "tmp-"), ("hy2", "nat", True, "nat-"),
+                 ("hy2", "nat", False, ""), ("vless", "nat", False, ""))
+        for protocol, landing, classified, prefix in cases:
+            with self.subTest(protocol=protocol, landing=landing, classified=classified):
+                host = mock.Mock()
+                host.tag_prefix = protocol + "-temp-"
+                host.prepare_create.return_value = ("creator.sh", "verified", {}, classified)
+                host.occupied_ports.return_value = set()
+                host.managed_rules.return_value = set()
+                host.paths.return_value = ()
+                host.tag_absent.return_value = False
+                host.bash.side_effect = sync.SyncError("fixture start failure")
+                row = node(protocol, 40011, "source", nat=landing == "nat")
+                row["sampled_at"] = int(time.time())
+                identifier = f"{prefix}sync-{landing}-40011-1234567890"
+                tag = host.tag_prefix + identifier
+                with mock.patch.object(sync.secrets, "token_hex", return_value="1234567890"):
+                    with self.assertRaisesRegex(sync.SyncError, "已清除本次节点"):
+                        sync.Native.create(host, row, "fixture-source")
+                host.port_unowned.assert_called_once_with(40011, tag)
+                host.paths.assert_called_once_with(tag)
+                self.assertEqual(host.env.call_args.kwargs["id"], identifier)
+                self.assertEqual(host.store_recovery.call_args.args[0]["tag"], tag)
+                host.tag_absent.assert_called_once_with(40011, tag)
+                host.clean.assert_called_once_with(40011, tag)
+                host.complete.assert_called_once_with()
+
     def test_classified_hy2_creator_pin_is_specific_and_accepts_legacy(self):
         host = object.__new__(sync.Native)
         host.protocol = "hy2"
