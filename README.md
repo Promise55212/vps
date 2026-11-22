@@ -34,7 +34,7 @@
 ### Linux
 
 ```bash
-bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'liucong552-art/vps' 'a5b82e2877cfef7249e59062b8bd1ec71a42574a' --compare
+bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'liucong552-art/vps' '25f87be0958186a0ea69e1552ec0f815ab0db802' --compare
 ```
 
 用解压文件直接运行时执行 `python3 -IB -X utf8 node_sync.py --compare`。
