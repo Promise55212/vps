@@ -118,7 +118,7 @@ $targetProtocol = if ($protocol -eq 'hy2') { 'vless' } else { 'hy2' }
 Write-Host ('源机 {0} {1}:{2} → 目标机 {3} {4}:{5}' -f $protocol, $source, $sourcePort, $targetProtocol, $target, $targetPort)
 
 # Pin the engine revision used by the Windows launcher.
-$engineUrl = 'https://raw.githubusercontent.com/liucong552-art/vps/25f87be0958186a0ea69e1552ec0f815ab0db802/node_sync.py'
+$engineUrl = 'https://raw.githubusercontent.com/Promise55212/vps/25f87be0958186a0ea69e1552ec0f815ab0db802/node_sync.py'
 $engine = Join-Path ([IO.Path]::GetTempPath()) ('hvs-' + [guid]::NewGuid() + '.py')
 $options = @(
     $mode, '--source-protocol', $protocol, '--source', $source, '--target', $target,

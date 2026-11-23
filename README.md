@@ -18,7 +18,7 @@
 在开始菜单搜索并打开 **PowerShell**，复制下面整行，粘贴后按回车。启动器会自动下载固定版本的同步脚本，并在结束时清理下载文件。
 
 ```powershell
-& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/liucong552-art/vps/refs/heads/main/start-sync.ps1').Content.TrimStart([char]0xFEFF)))
+& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/Promise55212/vps/refs/heads/main/start-sync.ps1').Content.TrimStart([char]0xFEFF)))
 ```
 
 每次都用同一行启动，按以下顺序选择：
@@ -34,7 +34,7 @@
 ### Linux
 
 ```bash
-bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'liucong552-art/vps' '25f87be0958186a0ea69e1552ec0f815ab0db802' --compare
+bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mktemp); trap '"'"'rm -f -- "$f"'"'"' EXIT; curl --proto "=https" -fsSL --max-time 60 "https://raw.githubusercontent.com/$repo/$rev/node_sync.py" -o "$f"; python3 -IB -X utf8 "$f" "$@"' _ 'Promise55212/vps' '25f87be0958186a0ea69e1552ec0f815ab0db802' --compare
 ```
 
 用解压文件直接运行时执行 `python3 -IB -X utf8 node_sync.py --compare`。
@@ -55,11 +55,11 @@ bash -c 'set -e; repo=$1; rev=$2; shift 2; [[ $rev =~ ^[a-f0-9]{40}$ ]]; f=$(mkt
 
 ## 原生兼容和创建规则
 
-- 本版本按以下上游安装器审核了原生审计、创建、清理、临时服务、配额与重置脚本。预检会逐文件核对已审核的 SHA-256。发现路径缺失或版本不符时显示路径，版本不符同时给出实际哈希。适配其他安装版时，需要其对应原生脚本内容及只读审计，才能重新验证入口。 [HY2 上游](https://github.com/liucong552-art/hy2jieshu/tree/43c7c7df729bc6e71de734eb83a6960db8de7aac) · [VLESS 上游](https://github.com/liucong552-art/jieshu/tree/1ac27d2d82c545c12b35638bd9f0ac3193c9d2b4)
+- 本版本按以下上游安装器审核了原生审计、创建、清理、临时服务、配额与重置脚本。预检会逐文件核对已审核的 SHA-256。发现路径缺失或版本不符时显示路径，版本不符同时给出实际哈希。适配其他安装版时，需要其对应原生脚本内容及只读审计，才能重新验证入口。 [HY2 上游](https://github.com/Promise55212/hy2jieshu/tree/43c7c7df729bc6e71de734eb83a6960db8de7aac) · [VLESS 上游](https://github.com/Promise55212/jieshu/tree/1ac27d2d82c545c12b35638bd9f0ac3193c9d2b4)
 - 新建以来源 `CREATE_EPOCH`、`DURATION_SECONDS` 算同一个到期时刻，原生管理器启动服务前就装好源节点的原始总配额、本期余额、周期和绝对重置时刻。零余额会按已耗尽建立保护，等原生周期重置。密码、UUID 和入口发布资料由目标原生环境提供。
 - 使用来源的本地或 WG-NAT 出口类型、IPv4/IPv6 入站、IP 上限和 Sticky 秒数。WG-NAT 默认检查目标的同名接口及本机标记路由、握手和原生组件。接口确实对应但名字不同时，使用 `--wg-map wg-source=wg-target`。IPv6 使用目标原有的发布域名。
 - 新增节点的链接名称含有 `sync-nat-端口` 或 `sync-local-端口`，分别表示 WG-NAT 和本机出口。已有节点的出口可在详细对账的「当前目标节点」表中按端口查找。
-- 使用新版原生创建器的 HY2 目标会在名称前加 `hy2-temp-nat-` 或 `hy2-temp-tmp-`，旧版 HY2 沿用原命名。 [新版 HY2 安装器](https://github.com/liucong552-art/hy2jieshu/blob/1d16b2145db4e7132a0a91fba27558fba3dc8c67/hy2.sh)
+- 使用新版原生创建器的 HY2 目标会在名称前加 `hy2-temp-nat-` 或 `hy2-temp-tmp-`，旧版 HY2 沿用原命名。 [新版 HY2 安装器](https://github.com/Promise55212/hy2jieshu/blob/1d16b2145db4e7132a0a91fba27558fba3dc8c67/hy2.sh)
 - 临时脚本程序通过 SSH 标准输入传输。适配器在内存中把准确时间和额度交给审核过的原生创建流程，服务器的原生脚本继续供日常业务使用。正常完成时 SSH 退出、原生锁释放，恢复记录清除。限速由目标机管理，历史流量展示已保存记录。
 
 ## 中断和恢复

@@ -29,10 +29,10 @@ python3 -B -m unittest discover -s tests -v
 
 | 本地文件名 | 上游固定版本 |
 | --- | --- |
-| `hy2jieshu-hy2.sh` | [HY2 安装器](https://raw.githubusercontent.com/liucong552-art/hy2jieshu/43c7c7df729bc6e71de734eb83a6960db8de7aac/hy2.sh) |
-| `hy2jieshu-natjichang.sh` | [HY2 NAT 安装器](https://raw.githubusercontent.com/liucong552-art/hy2jieshu/43c7c7df729bc6e71de734eb83a6960db8de7aac/natjichang.sh) |
-| `jieshu-vless.sh` | [VLESS 安装器](https://raw.githubusercontent.com/liucong552-art/jieshu/1ac27d2d82c545c12b35638bd9f0ac3193c9d2b4/vless.sh) |
-| `jieshu-natjichang.sh` | [VLESS NAT 安装器](https://raw.githubusercontent.com/liucong552-art/jieshu/1ac27d2d82c545c12b35638bd9f0ac3193c9d2b4/natjichang.sh) |
+| `hy2jieshu-hy2.sh` | [HY2 安装器](https://raw.githubusercontent.com/Promise55212/hy2jieshu/43c7c7df729bc6e71de734eb83a6960db8de7aac/hy2.sh) |
+| `hy2jieshu-natjichang.sh` | [HY2 NAT 安装器](https://raw.githubusercontent.com/Promise55212/hy2jieshu/43c7c7df729bc6e71de734eb83a6960db8de7aac/natjichang.sh) |
+| `jieshu-vless.sh` | [VLESS 安装器](https://raw.githubusercontent.com/Promise55212/jieshu/1ac27d2d82c545c12b35638bd9f0ac3193c9d2b4/vless.sh) |
+| `jieshu-natjichang.sh` | [VLESS NAT 安装器](https://raw.githubusercontent.com/Promise55212/jieshu/1ac27d2d82c545c12b35638bd9f0ac3193c9d2b4/natjichang.sh) |
 
 ```bash
 HY2_VLESS_TEST_UPSTREAM=/path/to/read-only-upstream-copies python3 -B -m unittest discover -s tests -v
@@ -40,4 +40,4 @@ HY2_VLESS_TEST_UPSTREAM=/path/to/read-only-upstream-copies python3 -B -m unittes
 
 可以指定 `HY2_VLESS_TEST_TMP` 使用一个已经存在的本地临时目录。测试只调用这次模拟的原生资源。
 
-另设 `HY2_VLESS_TEST_CLASSIFIED_INSTALLER=/path/to/new/hy2.sh`，可用[新版 HY2 安装器](https://raw.githubusercontent.com/liucong552-art/hy2jieshu/1d16b2145db4e7132a0a91fba27558fba3dc8c67/hy2.sh)核对哈希和适配后创建器的 Bash 语法。普通测试模拟新前缀节点的启动失败，验证创建前检查、恢复记录和清理使用同一节点标签。上表的旧版安装器用于验证兼容性。
+另设 `HY2_VLESS_TEST_CLASSIFIED_INSTALLER=/path/to/new/hy2.sh`，可用[新版 HY2 安装器](https://raw.githubusercontent.com/Promise55212/hy2jieshu/1d16b2145db4e7132a0a91fba27558fba3dc8c67/hy2.sh)核对哈希和适配后创建器的 Bash 语法。普通测试模拟新前缀节点的启动失败，验证创建前检查、恢复记录和清理使用同一节点标签。上表的旧版安装器用于验证兼容性。
